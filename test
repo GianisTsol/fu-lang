@@ -1,0 +1,6 @@
+let foo = "bar";
+
+let ddd = "aaaa";
+
+
+let t = ddd;

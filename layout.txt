@@ -1,0 +1,15 @@
+
+types:
+int
+str - ""
+
+
+
+func func_name(arg: int, arg1: str) {
+    println(arg1)
+}
+
+
+int a = 0
+
+func_name(a, "")
