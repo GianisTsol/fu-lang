@@ -1,6 +1,13 @@
-func func_name(t, k) {
+func main(t, k) {
     int d = 1;
-    d = 3 + 1 + 4;
-    int f = 0;
-    f = 3 + 1;
+
+    foo();
 }
+
+func foo(a) {
+    int foo = 7;
+    int bar = 9;
+}
+
+
+
