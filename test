@@ -1,13 +1,14 @@
-func main(t, k) {
-    int d = 1;
+func main() {
 
-    foo();
+    int w = 12400;
+    int q = 145;
+
+
+    other(q);
+    printn(w);
+
 }
 
-func foo(a) {
-    int foo = 7;
-    int bar = 9;
+func other(f) {
+    printn(f);
 }
-
-
-

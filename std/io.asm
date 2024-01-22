@@ -97,23 +97,3 @@ _int_to_string_loop:
     jnz _int_to_string_loop
     ret
 
-main:
-     mov rax, 8
-     call alloc
-; Initialize variable w
-     mov     dword [rax] , 12400
-     mov rax, [rax]
-     mov rbx, rax
-     mov rax, 8
-     call alloc
-; Initialize variable q
-     mov     dword [rax] , 145
-     mov rax, [rax]
-     call other
-     mov rax, rbx ;Load arg
-     call printn
-     ret
-other:
-     ; f: rax
-     call printn
-     ret
