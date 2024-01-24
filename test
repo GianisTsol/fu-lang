@@ -1,14 +1,13 @@
+import io;
+
 func main() {
 
-    int w = 12400;
-    int q = 145;
+    int w = 12410;
 
-
-    other(q);
-    printn(w);
+    other(w, 0);
 
 }
 
-func other(f) {
-    printn(f);
+func other(m, n) {
+    printn(n);
 }

@@ -17,9 +17,6 @@ _start:
     xor     rdi, rdi         ; exit code 0
     syscall             ; Call kernel
 
-allocation_failed:
-    ; Handle allocation failure (if necessary)
-    ; Your error-handling code goes here
 
 section .text
     global alloc
