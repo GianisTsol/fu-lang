@@ -51,8 +51,6 @@ func int_to_string(var) {
     lea rdi, qword [buffer] //return buffer pointer
                             //size already in rcx
 
-    ret
-
     ;
 }
 
@@ -74,7 +72,6 @@ func _int_to_string_loop() {
 
     cmp rax, 0
     jnz _int_to_string_loop
-    ret
 
     ;
 }
@@ -96,7 +93,6 @@ func alloc(size) {
     syscall
 
     mov rax, rbp
-    ret
 
     ;
 }

@@ -1,17 +1,23 @@
 use core::str;
 use std::collections::HashMap;
 
-use std::collections::btree_map::Range;
 use std::env;
+use std::fmt::format;
+use std::ops::Index;
 use std::process;
 
-use std;
-
 use std::fs;
-
-type VAR = i32;
+use std::usize;
 
 type SCOPE = Vec<String>;
+
+#[derive(Clone)]
+
+enum VAR {
+    Char,
+    Int,
+    Ptr,
+}
 
 #[derive(Clone, Debug)]
 struct FuncCallObj {
@@ -29,7 +35,7 @@ impl OpCallObj {
         let mut g = vec![];
         for arg in &self.args {
             match arg {
-                VarType::LocalVar(f) => g.push(f.clone()),
+                VarType::LocalVar(f, _) => g.push(f.clone()),
                 _ => {}
             }
         }
@@ -39,7 +45,7 @@ impl OpCallObj {
 
 #[derive(Clone, Debug)]
 enum VarType {
-    LocalVar(String),
+    LocalVar(String, i32),
     InitVar(VarInitObj),
     StaticVar(StaticValObj),
     CallOp(OpCallObj),
@@ -50,9 +56,20 @@ enum VarType {
 struct VarInitObj {
     name: String,
     val: Box<VarType>,
-    // TODO: implement more types
+    indexes: Box<VarType>, // TODO: implement more types
 }
 
+impl VarInitObj {
+    fn get_variables_involved(&self) -> Vec<String> {
+        let mut g = vec![];
+        match &*self.val {
+            VarType::LocalVar(f, _) => g.push(f.clone()),
+            VarType::CallOp(f) => g.extend(f.get_variables_involved()),
+            _ => {}
+        }
+        return g;
+    }
+}
 struct TempVarObj {
     id: i32,
 }
@@ -95,11 +112,14 @@ impl FuncObj {
                 }
                 VarType::InitVar(o) => {
                     p.insert(o.name.clone(), i);
+                    for j in o.get_variables_involved() {
+                        p.insert(j, i);
+                    }
                 }
                 VarType::CallFunc(o) => {
                     for h in &o.args {
                         match h {
-                            VarType::LocalVar(qq) => {
+                            VarType::LocalVar(qq, _) => {
                                 p.insert(qq.clone(), i);
                             }
                             _ => {}
@@ -109,7 +129,6 @@ impl FuncObj {
                 _ => {}
             }
         }
-        println!("{:?} gggggg", &p);
         return p;
     }
 
@@ -183,9 +202,7 @@ fn parse_func(inst: String, parser: &Parser) -> FuncObj {
 
     f.parse_props(props);
     for i in &f.props {
-        println!("{}", &i.0);
         if i.0 == "_asm" {
-            println!("{:?}", i.0);
             return f;
         }
     }
@@ -256,11 +273,13 @@ fn parse_call(cmd: String, func: &FuncObj, parser: &Parser) -> Option<FuncCallOb
     return Some(c);
 }
 fn parse_var_init(cmd: String, parser: &Parser, f: &mut FuncObj) -> Option<VarType> {
-    for dec in vec!["int "] {
+    for dec in vec!["int ", "char "] {
         if cmd.contains(&dec) {
             let ind = cmd.find(dec).unwrap_or(0) + dec.len();
             let mut ne = cmd.len();
             let mut val = VarType::StaticVar(StaticValObj { val: 0 });
+            let mut arr_sz = VarType::StaticVar(StaticValObj { val: 1 });
+
             if cmd.contains("=") {
                 ne = cmd.find("=").unwrap() + 1;
                 match parse_exp(cmd[ne..].to_string(), &parser, &f) {
@@ -270,11 +289,21 @@ fn parse_var_init(cmd: String, parser: &Parser, f: &mut FuncObj) -> Option<VarTy
                     None => {}
                 }
             }
+            if cmd.contains("[") && cmd.contains("]") {
+                let a = cmd.find("[").unwrap();
+                let b = cmd.find("]").unwrap();
+                if b < ne {
+                    ne = a + 1;
+                    arr_sz = parse_var(cmd[a + 1..b].to_string(), &f, &parser);
+                }
+            }
             let name = (cmd[ind..ne - 1]).to_string().replace(" ", "");
+            println!("aaaa {}", name.as_str());
             f.locals.push(name.clone());
             let m = VarType::InitVar(VarInitObj {
                 name: name,
                 val: Box::new(val),
+                indexes: Box::new(arr_sz),
             });
             return Some(m);
         }
@@ -314,9 +343,25 @@ fn parse_exp(acmd: String, parser: &Parser, func: &FuncObj) -> Option<VarType> {
 
 fn parse_var(v: String, func: &FuncObj, parser: &Parser) -> VarType {
     let val = v.replace(" ", "");
+    let mut arr_i = 0;
+    let mut t: usize = val.len();
+    if val.contains("[") && val.contains("]") {
+        let a = val.find("[").unwrap();
+        let b = val.find("]").unwrap();
+
+        let ggg = parse_var(val[a + 1..b].to_string(), &func, &parser);
+        match ggg {
+            VarType::StaticVar(q) => arr_i = q.val,
+            _ => {}
+        }
+        println!("{:?}", &arr_i);
+        t = a;
+    }
+    let var_name = val[..t].to_string();
+    println!("{:?}", &func.locals);
     for i in &func.locals {
-        if i == &val {
-            return VarType::LocalVar(i.clone());
+        if i == &var_name {
+            return VarType::LocalVar(var_name, arr_i);
         }
     }
     match parse_call(v, func, parser) {
@@ -345,12 +390,6 @@ pub fn parse(file_content: String) -> Parser {
 
     for f in funcs {
         let mut d = parse_func(f, &parser);
-
-        println!("++++ {} ++++", &d.name);
-        for i in &d.block {
-            println!("{:?}", i);
-        }
-        println!("++++++++++++++++++++++");
 
         parser.funcs.push(d)
     }
@@ -384,7 +423,7 @@ fn execute_set(mut op: OpCallObj, scope: &mut HashMap<String, i32>) -> i32 {
 
         let mut name = String::new();
         match op.args.pop().unwrap() {
-            VarType::LocalVar(v) => name = v,
+            VarType::LocalVar(v, _) => name = v,
             _ => {}
         };
         scope.insert(name, val);
@@ -405,7 +444,7 @@ fn execute_op_tree(op: OpCallObj, scope: &mut HashMap<String, i32>) -> i32 {
             VarType::StaticVar(a) => {
                 tmp = a.val;
             }
-            VarType::LocalVar(a) => {
+            VarType::LocalVar(a, _) => {
                 tmp = scope.get(&*a).unwrap().clone();
             }
             _ => {}
@@ -438,7 +477,7 @@ fn execute(block: Vec<VarType>, parser: &Parser) -> VAR {
                         scope.insert(a.name, b.val);
                     }
                     VarType::InitVar(_b) => {}
-                    VarType::LocalVar(b) => {
+                    VarType::LocalVar(b, _) => {
                         let other = scope.get(&b);
                         scope.insert(a.name, other.unwrap().clone());
                     }
@@ -459,7 +498,7 @@ fn execute(block: Vec<VarType>, parser: &Parser) -> VAR {
             _ => {}
         }
     }
-    return 0;
+    return VAR::Int;
 }
 fn split_blocks(start: &str, end: &str, content: &String) -> Vec<String> {
     let mut results: Vec<String> = vec![];
@@ -495,16 +534,21 @@ fn main() {
         process::exit(0);
     }
 
-    let file_path = args[1].clone();
+    let file_path = args[2].clone();
     println!("Opening {}", &file_path);
 
     let file_content = fs::read_to_string(file_path).expect("Cant Open File");
     let fi = remove_comments(file_content);
 
     let mut p = parse(fi);
-    p.name = args[1].clone();
-    //execute_start(&p);
-    assemble(&p);
+    let act = args[1].clone();
+    p.name = args[2].clone();
+    match act.as_str() {
+        "build" => assemble(&p),
+        "run" => execute_start(&p),
+        _ => {}
+    }
+    println!("Finished");
 }
 
 fn remove_comments(s: String) -> String {
@@ -518,8 +562,29 @@ fn remove_comments(s: String) -> String {
     }
     buf.join("")
 }
+#[derive(Clone)]
+struct VarStore {
+    name: String,
+    register: String,
+    var_type: VAR,
+    size: usize,
+    block_size: usize, // char foo[5 <---]
+}
+
+impl VarStore {
+    fn asm_move_to_reg(&mut self, reg: String) -> String {
+        if self.block_size != 1 {
+            println!("Tried moving array in memory to register");
+            return "".to_string();
+        }
+        let t = format!("     mov {}, [{}]", &reg, self.register);
+        if self.register != reg {}
+        self.register = reg;
+        return t;
+    }
+}
 struct RegMan {
-    variables: HashMap<String, String>,
+    variables: HashMap<String, VarStore>,
     available: Vec<String>,
     total: Vec<String>,
     function_reg_destroy: HashMap<String, Vec<String>>,
@@ -542,30 +607,138 @@ impl RegMan {
         }
     }
 
-    fn borrow(&mut self) -> String {
-        println!("{:?}", self.available);
+    fn get_free_reg(&mut self) -> String {
         return self.available.pop().unwrap();
     }
 
-    fn free(&mut self, s: String) {
+    fn free_reg(&mut self, s: String) {
         self.available.push(s);
     }
 
     fn save_var(&mut self, s: String, name: String) {
-        self.variables.insert(name, s);
+        self.variables.insert(
+            name.clone(),
+            VarStore {
+                name: name,
+                register: s,
+                var_type: VAR::Int,
+                size: 8,
+                block_size: 1,
+            },
+        );
     }
+
+    fn save_mem_ptr(&mut self, s: String, name: String, block_size: usize) {
+        if let Some(pos) = self.available.iter().position(|x| *x == s) {
+            self.available.remove(pos);
+        }
+        self.variables.insert(
+            name.clone(),
+            VarStore {
+                name: name,
+                register: s,
+                var_type: VAR::Ptr,
+                size: 8,
+                block_size: block_size,
+            },
+        );
+    }
+    fn get_var_ptr(&self, name: &String) -> String {
+        let k = self.variables.get(name).unwrap();
+        match k.var_type {
+            VAR::Ptr => k.register.clone(),
+            _ => "".to_string(),
+        }
+    }
+
+    fn move_var(&mut self, name: String, index: usize, register: String) -> String {
+        let mut buf = vec![];
+        println!("{}", &name);
+        let k = self.variables.get(&name).unwrap();
+        match k.var_type {
+            VAR::Ptr => {
+                let mut temp_ptr_reg = k.register.clone();
+                if index > 0 {
+                    temp_ptr_reg = self.get_free_reg();
+                    buf.push(format!(
+                        "     lea {}, qword [{} + {}]\n",
+                        &temp_ptr_reg,
+                        self.get_var_ptr(&name),
+                        index * 8
+                    ));
+                    self.free_reg(temp_ptr_reg.clone());
+                }
+                buf.push(format!(
+                    "    mov {}, qword [{}]\n",
+                    &register, &temp_ptr_reg
+                ));
+            }
+            _ => {}
+        };
+        buf.join("")
+    }
+    fn set_var(&mut self, name: String, index: usize, s: VarType) -> String {
+        let mut buf = vec![];
+        println!("{}", &name);
+        let k = self.variables.get(&name).unwrap();
+        match k.var_type {
+            VAR::Ptr => {
+                let mut temp_ptr_reg = k.register.clone();
+                if index > 0 {
+                    temp_ptr_reg = self.get_free_reg();
+                    buf.push(format!(
+                        "     lea {}, qword [{} + {}]\n",
+                        &temp_ptr_reg,
+                        self.get_var_ptr(&name),
+                        index * 8
+                    ));
+                    self.free_reg(temp_ptr_reg.clone());
+                }
+                match s {
+                    VarType::StaticVar(st) => {
+                        buf.push(format!("    mov qword [{}], {}\n", &temp_ptr_reg, &st.val));
+                    }
+                    VarType::LocalVar(name, ind) => {
+                        let t = self.get_free_reg();
+                        buf.push(self.move_var(name.clone(), ind as usize, t.clone()));
+                        buf.push(format!(
+                            "    mov qword [{}], {} ; {}\n",
+                            &temp_ptr_reg, &t, &name
+                        ));
+                        self.free_reg(t);
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        };
+        buf.join("")
+    }
+
     fn destroys(&mut self, l: String) -> String {
         let mut buf = vec![];
         for h in self.variables.clone() {
-            if h.1 == l {
+            if h.1.register == l {
                 let n = self.available.pop();
                 match n {
                     Some(f) => {
-                        self.free(h.1.clone());
-                        self.save_var(f.clone(), h.0.clone());
-                        buf.push(format!("     mov {}, {} ; not preserved\n", f, h.1.clone()));
+                        self.free_reg(h.1.register.clone());
+                        match h.1.var_type {
+                            VAR::Ptr => {
+                                self.save_mem_ptr(f.clone(), h.1.name.clone(), h.1.block_size)
+                            }
+                            VAR::Int => self.save_var(f.clone(), h.1.name.clone()),
+                            _ => {}
+                        }
+                        buf.push(format!(
+                            "     mov {}, {} ; not preserved\n",
+                            f,
+                            h.1.register.clone()
+                        ));
                     }
-                    None => {}
+                    None => {
+                        panic!("no available registers, the dev hasnt implemented stack use yet")
+                    }
                 };
             }
         }
@@ -573,11 +746,11 @@ impl RegMan {
     }
 
     fn var_out_of_scope(&mut self, v: &String) {
-        println!("{}", &v);
         let mut k = self.variables.get_mut(v).cloned();
         match k {
             Some(gg) => {
-                self.remove(&gg.clone());
+                println!("Variable out of scope: {}", &gg.name);
+                self.remove(&gg.name.clone());
             }
             None => {
                 println!("Unknown var out of scope this should NOT happen");
@@ -586,7 +759,8 @@ impl RegMan {
     }
 
     fn remove(&mut self, k: &String) {
-        self.available.push(k.clone());
+        let v = self.variables.get(k).unwrap();
+        self.available.push(v.register.clone());
         self.variables.remove(k);
     }
 
@@ -605,38 +779,31 @@ impl RegMan {
 fn assemble_inst(op: &&VarType, regs: &mut RegMan, func: &FuncObj) -> String {
     match op {
         VarType::InitVar(q) => {
-            let mut buf: Vec<String> = vec![];
-            buf.push(regs.destroys("rax".to_string()));
-            buf.push(format!("{}", "     mov rax, 8\n     call alloc\n"));
-            let r = regs.borrow();
-            match &*q.val {
-                VarType::StaticVar(z) => {
-                    buf.push(format!("; Initialize variable {}\n", &q.name));
-                    buf.push(format!("     mov     dword [rax] , {}\n", z.val));
-                    buf.push(format!("     mov {}, [rax]\n", &r));
-                }
+            let mut sz: usize = 8;
+            match *q.indexes.clone() {
+                VarType::StaticVar(ss) => sz = ss.val as usize,
                 _ => {}
             }
-            regs.save_var(r, q.name.clone());
+            let mut buf: Vec<String> = vec![];
+            buf.push(regs.destroys("rax".to_string()));
+            buf.push(format!("     mov rax, {}\n     call alloc\n", sz * 8));
+            regs.save_mem_ptr("rax".to_string(), q.name.clone(), sz.clone());
+
+            if sz == 1 {
+                buf.push(regs.set_var(q.name.clone(), 0, (*q.val).clone()));
+            }
+
             return buf.join("");
         }
         VarType::CallFunc(q) => {
             let mut buf = vec![];
             for (index, arg) in q.args.iter().enumerate() {
                 match arg {
-                    VarType::LocalVar(ff) => {
+                    VarType::LocalVar(ff, ind) => {
                         let a = &regs.total[regs.total.len() - 1 - index].clone();
-                        println!("d {}", &ff);
-                        println!("dffffff {:?}", &regs.variables);
-                        let b = regs.variables.get(ff).unwrap().clone();
                         buf.push(regs.prepare_func_call(q.func.clone()));
-                        println!();
-                        if a != &b {
-                            buf.push(format!(
-                                "     mov {}, {} ;Load arg {}: {}\n",
-                                a, b, &index, &ff
-                            ));
-                        }
+                        buf.push(format!(";Load arg {}: {}\n", &index, &ff));
+                        buf.push(regs.move_var(ff.clone(), ind.clone() as usize, a.clone()));
                     }
                     _ => {}
                 }
@@ -646,7 +813,22 @@ fn assemble_inst(op: &&VarType, regs: &mut RegMan, func: &FuncObj) -> String {
             buf.join("")
         }
         VarType::CallOp(q) => {
-            format!("{}", "")
+            match q.op.as_str() {
+                "=" => {
+                    match &q.args[0] {
+                        VarType::LocalVar(ll, ind) => {
+                            return regs.set_var(
+                                ll.clone(),
+                                ind.clone() as usize,
+                                q.args[1].clone(),
+                            );
+                        }
+                        _ => {}
+                    };
+                }
+                _ => {}
+            };
+            String::new()
         }
         _ => String::new(),
     }
@@ -669,7 +851,6 @@ fn assemble_new_function(func: &FuncObj, regs: &mut RegMan) -> String {
         for l in lm.keys() {
             let endl = lm.get(l.as_str()).unwrap();
             if op.0 == *endl + 1 {
-                println!("sssfff {}", &l);
                 &regs.var_out_of_scope(&l);
             }
         }

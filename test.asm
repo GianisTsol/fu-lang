@@ -3,18 +3,18 @@ section .bss
 section .text
      global _start
 main:
+     mov rax, 32
+     call alloc
+     lea rbx, qword [rax + 24]
+    mov qword [rbx], 119
+     mov rbx, rax ; not preserved
      mov rax, 8
      call alloc
-; Initialize variable w
-     mov     dword [rax] , 12410
-     mov rax, [rax]
-     call other
-
-    ret
-other:
-     ; m: rax
-     ; n: rbx
-     mov rax, rbx ;Load arg 0: n
+     lea rdx, qword [rbx + 24]
+    mov rcx, qword [rdx]
+    mov qword [rax], rcx ; h
+;Load arg 0: g
+    mov rax, qword [rax]
      call printn
 
     ret
@@ -52,7 +52,6 @@ int_to_string:
     lea rdi, byte [buffer + 30] 
     call _int_to_string_loop
     lea rdi, qword [buffer] 
-    ret
     ;
     ret
 _int_to_string_loop:
@@ -67,7 +66,6 @@ _int_to_string_loop:
     mov [rbx], dl
     cmp rax, 0
     jnz _int_to_string_loop
-    ret
     ;
     ret
 alloc:
@@ -82,6 +80,5 @@ alloc:
     mov	rax, 0xC		 
     syscall
     mov rax, rbp
-    ret
     ;
     ret

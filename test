@@ -1,13 +1,8 @@
 import io;
 
 func main() {
-
-    int w = 12410;
-
-    other(w, 0);
-
-}
-
-func other(m, n) {
-    printn(n);
+    int h[4];
+    h[3] = 119;
+    int g = h[3];
+    printn(g);
 }
