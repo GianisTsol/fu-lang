@@ -1,0 +1,7 @@
+.env
+env/
+legacy/
+test.py
+test.fu
+old.fu
+__pycache__
