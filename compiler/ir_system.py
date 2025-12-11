@@ -45,8 +45,22 @@ class IRSystem:
             self.vreg = IRSystem.VirtualRegisterManager()
 
             self.variables = {}
-            self.types = []
+            self.types = {}
+            
+            self.memory_start_reg = self.vreg.new_vreg()
+            print("="*30)
+            print(f"Memory start ptr: {self.memory_start_reg}")
+            print("="*30)
+
+            self.memory_used = 0
+
+            self.pipe = []
             self.parent = parent
+
+        def get_memory(self, size):
+            m = self.memory_used
+            self.memory_used += size
+            return m
 
         def get_variable_register(self, var_name):
             """Get register for variable."""

@@ -23,7 +23,7 @@ class Instruction:
     def _validate(self):
         """Validate operand count and types."""
         validations = {
-            IMI.LOAD: (1,), IMI.STORE: (1,), IMI.MOVE: (2,),
+            IMI.LOAD: (2,), IMI.STORE: (2,), IMI.MOVE: (2,),
             IMI.PUSH: (1,), IMI.POP: (1,), IMI.JUMP: (1,),
             IMI.LABEL: (1,), IMI.ADD: (2,), IMI.SUB: (2,),
             IMI.MUL: (2,), IMI.DIV: (2,), IMI.CMP: (2,),
@@ -67,12 +67,12 @@ class InstructionBuilder:
         return Instruction(IMI.MOVE, (dest, src))
     
     @staticmethod
-    def load(reg):
-        return Instruction(IMI.LOAD, (reg,))
+    def load(reg, ptr):
+        return Instruction(IMI.LOAD, (reg, ptr))
     
     @staticmethod
-    def store(reg):
-        return Instruction(IMI.STORE, (reg,))
+    def store(reg, ptr):
+        return Instruction(IMI.STORE, (reg, ptr))
     
     @staticmethod
     def push(reg_or_val):

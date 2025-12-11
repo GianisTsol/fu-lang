@@ -3,7 +3,7 @@
 from enum import IntEnum
 
 # Parsing Configuration
-BOUNDINGS = (("(", ")"), ("{", "}"))
+BOUNDINGS = (("(", ")"), ("{", "}"), ("[", "]"))
 SEPARATORS = (";", ",", ".", ":")
 ARGS_REGISTERS = 4
 

@@ -14,7 +14,7 @@ def class_handler(name, block, context: IRSystem.BlockContext):
     class_context = context.create_child_context(name)
     code = block_handler(block, class_context)
 
-    context.types.append(name)
+    context.types[name] = {'size': 4}
 
     return code
 
@@ -146,19 +146,35 @@ def asm_handler(string, context):
     return [(imi, args[1], args[2])]
 
 OP_ASM_MAP = {}
-def op_asm_handler(op, args, asm, context: IRSystem.BlockContext):
+def op_asm_handler(op, asm, context: IRSystem.BlockContext):
     """Handle operators assembly"""
+
+    operator = None
+    args = []
+    result = None
+    ridx = None
+    d = op.split()
+    for k, v in enumerate(d):
+        if k == ridx:
+            continue
+        if "$" in v:
+            args.append(v.replace("$", ""))
+        elif "->" in v:
+            ridx = k + 1
+        elif (v[0], v[-1]) == ("{", "}"):
+            operator = v[1:len(v) - 1]
+    if ridx:
+        result = d[ridx].replace("$", "")
 
     loc = context.name
 
-    print(f"Declartion for op: {op} at {loc}")
+    print(f"Declartion for op {operator}: ({args}) -> {result} at {loc}")
 
     lines = block_handler(asm)
 
-    if loc in OP_ASM_MAP:
-        OP_ASM_MAP[loc][op] = lines
-    else:
-        OP_ASM_MAP[loc] = {op: lines}
+    if loc not in OP_ASM_MAP:
+        OP_ASM_MAP[loc] = {op: {}}
+    OP_ASM_MAP[loc][operator] = {"asm": lines, "args": args, "result": result}
 
     return []
 
@@ -167,6 +183,18 @@ def op_handler(left, op, right, context: IRSystem.BlockContext):
     namespace = context.get_global_prefix()
 
     ltype = context.get_variable_type(left)
+    loc = ltype
+
+    if loc in OP_ASM_MAP:
+        if op in OP_ASM_MAP[loc]:
+            op_data = OP_ASM_MAP[loc][op].copy()
+        else:
+            print(f"Operation not declared: {op}")
+            return []
+    else:
+        print(f"No ops found for namespace: {loc}")
+        return []
+
     rtype = context.get_variable_type(right)
 
     left_reg = context.get_variable_register(left)
@@ -177,30 +205,33 @@ def op_handler(left, op, right, context: IRSystem.BlockContext):
         right_reg = right
     except:
         pass
-
-    loc = ltype
-    if loc in OP_ASM_MAP:
-        if op in OP_ASM_MAP[loc]:
-            lines = OP_ASM_MAP[loc][op]
-        else:
-            print(f"Operation not declared: {op}")
-            return []
-    else:
-        print(f"No ops found for namespace: {loc}")
-        return []
     
+    regs = [left_reg, right_reg]
+
+    result_reg = None
+    if op_data["result"]:
+        result_reg = context.vreg.new_vreg()
+        context.update_variable_register("_ret_op_temp", result_reg)
+
     final = []
-    result_reg = context.vreg.new_vreg()
-    context.update_variable_register("op_temp", result_reg)
-    for line in lines:
+
+    for line in op_data["asm"]:
         nl = []
-        for i in line:
-            if type(i) is str:
-                s = i.replace("left", left_reg).replace("right", right_reg).replace("result", result_reg)
-                nl.append(s)
+        for word in line:
+            if type(word) == int:
+                nl.append(word)
+                continue
+            elif result_reg and (op_data["result"] in word):
+                nl.append(result_reg)
+                continue
             else:
-                nl.append(i)
+                for i, arg in enumerate(op_data["args"]):
+                    if word in arg:
+                        nl.append(regs[i])
+                        break
+
         final.append(tuple(nl))
+                    
     return final
 
 def multi_op_handler(left, op, right, context: IRSystem.BlockContext):
@@ -208,46 +239,60 @@ def multi_op_handler(left, op, right, context: IRSystem.BlockContext):
     namespace = context.get_global_prefix()
 
     r = block_handler(right, context=context)
+    r_reg = context.get_variable_register("_ret_op_temp")
+    context.update_variable_register("_ret_op_temp1", r_reg)
+    l = block_handler(left, context=context)
 
-    ltype = context.get_variable_type(left)
-    rtype = context.get_variable_type("op_temp")
+    print(r)
+    print(l)
 
-    left_reg = context.get_variable_register(left)
-    right_reg = context.get_variable_register("op_temp")
-
-    try:
-        int(right)
-        right_reg = right
-    except:
-        pass
-
-    loc = ltype
-    if loc in OP_ASM_MAP:
-        if op in OP_ASM_MAP[loc]:
-            lines = OP_ASM_MAP[loc][op]
-        else:
-            print(f"Operation not declared: {op}")
-            return []
-    else:
-        print(f"No ops found for namespace: {loc}")
-        return []
-    
-    final = []
-    result_reg = context.vreg.new_vreg()
-    context.update_variable_register("op_temp", result_reg)
-    for line in lines:
-        nl = []
-        for i in line:
-            if type(i) is str:
-                s = i.replace("left", left_reg).replace("right", right_reg).replace("result", result_reg)
-                nl.append(s)
-            else:
-                nl.append(i)
-        final.append(tuple(nl))
+    final = op_handler("_ret_op_temp1", op, "_ret_op_temp1", context=context)
     r.extend(final)
-    print("OP ASM: ", r)
+
+
     return r
 
+def array_declaration_handler(name, size, typ, context):
+    code = []
+    reg = context.vreg.new_vreg()
+    offset = context.get_memory(int(size))
+    code.append(IRSystem.ib.move(reg, context.memory_start_reg).to_tuple())
+    code.append(IRSystem.ib.add(reg, offset).to_tuple())
+
+    #TODO: malloc and set reg to ptr of arr[0]
+    final_size = context.types[typ]['size'] * size
+    context.update_variable_register(name, reg)
+    context.set_variable_type(name, typ)
+    print(f"Declared '{name}': {typ} with size {size} in {reg}")
+    return code
+
+def ref_handler(name, context):
+    reg = context.get_variable_register(name)
+    context.update_variable_register(f"temp", reg)
+
+
+def ref_index_handler(name, index, context: IRSystem.BlockContext):
+    print("ref index handler")
+    code = []
+    n = context.vreg.new_vreg()
+    c = context.get_variable_register(name)
+
+    i_reg = context.get_variable_register(index)
+    code.append(IRSystem.ib.move(n, c).to_tuple())
+    code.append(IRSystem.ib.add(n, i_reg or index).to_tuple())
+    code.append(IRSystem.ib.load(n, n).to_tuple())
+
+    context.update_variable_register(f"temp", n)
+
+    return code
+
+def if_handler(cond, block, context: IRSystem.BlockContext):
+    pass
+
+def while_handler(cond, block, context):
+    code = []
+    r = block_handler(cond, context=context)
+    print(r)
 
 TEMPLATES_HANDLERS = [
 ("class $name { *block }", class_handler),
@@ -258,16 +303,25 @@ TEMPLATES_HANDLERS = [
 
 ("call $name( *args )", call_handler),
 
+("if ( *cond ) { *block }", if_handler),
+("while ( *cond ) { *block }", while_handler),
+
+
+("_op_asm $op { *asm }", op_asm_handler),
+
+("_asm $string", asm_handler),
+
+("$name[$size]: $type", array_declaration_handler),
 ("$name: $type", declaration_handler),
 ("new $name: $type", declaration_handler),
 
-("$left $op ( *right )", multi_op_handler),
+("( *left ) $op ( *right )", multi_op_handler),
 
 ("$left $op $right", op_handler),
 
-("_op_asm $op ( *args ) { *asm }", op_asm_handler),
+("$name", ref_handler),
+("$name[ $index ]", ref_index_handler),
 
-("_asm $string", asm_handler),
 
 ]
 
@@ -319,7 +373,6 @@ def block_handler(block, context=None):
             result = handler(*values, context)
 
             if result:
-                print(result)
                 instructions.extend(result)
         except Exception as e:
             print(f"Error in {handler.__name__}: {e}")
