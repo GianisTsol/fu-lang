@@ -8,12 +8,15 @@ from parser import parse as parse_tokens
 from config import IMI
 
 
-def class_handler(name, block, context):
+def class_handler(name, block, context: IRSystem.BlockContext):
     """Handle class declarations."""
     print(f"Class: {name}")
     class_context = context.create_child_context(name)
-    return block_handler(block, class_context)
+    code = block_handler(block, class_context)
 
+    context.types.append(name)
+
+    return code
 
 def func_handler(name, args, block, context):
     """Handle function declarations."""
@@ -58,7 +61,7 @@ def return_handler(value, context):
         return []
 
 
-def call_handler(name, args, context):
+def call_handler(name, args, context: IRSystem.BlockContext):
     """Handle function calls."""
     print(f"Call: {name}, Args: {args}")
     code = []
@@ -80,7 +83,7 @@ def call_handler(name, args, context):
     
     code.append(IRSystem.ib.push("INST_PTR").to_tuple())
     code.append(IRSystem.ib.jump(name).to_tuple())
-    
+    context.types.append(name)
     return code
 
 
@@ -120,46 +123,17 @@ def addto_handler(left, right, context):
     
     return [IRSystem.ib.add(left_reg, right_reg or right).to_tuple()]
 
-
-def assignment_handler(name, exp, context):
-    """Handle assignments."""
-    print(f"Assignment: {name} = {exp}")
-
-    to_reg = context.get_variable_register(name)
-    
-    if not to_reg:
-        to_reg = context.vreg.new_vreg()
-        context.update_variable_register(name, to_reg)
-
-    if len(exp) == 1:
-        value = exp[0][1]
-        try:
-            return [IRSystem.ib.move(to_reg, int(value)).to_tuple()]
-        except ValueError:
-            pass
-    
-        from_reg = context.get_variable_register(value)
-        if not from_reg:
-            print(f"Warning: '{value}' not found")
-            return [IRSystem.ib.move(to_reg, value).to_tuple()]
-        return [IRSystem.ib.move(to_reg, from_reg).to_tuple()]
-
-    else:
-        r = block_handler(exp, context=context)
-        print("RR", r)
-
-
-def declaration_handler(name, var_type, context):
+def declaration_handler(name, var_type, context: IRSystem.BlockContext):
     """Handle variable declarations."""
     reg = context.vreg.new_vreg()
     context.update_variable_register(name, reg)
+    context.set_variable_type(name, var_type)
     print(f"Declared '{name}': {var_type} in {reg}")
     return []
 
 
 def asm_handler(string, context):
     """Handle harcoded assembly"""
-    print(f"Asm: '{string}'")
     string = string.replace(",", " ")
 
     args = string.split()
@@ -172,13 +146,15 @@ def asm_handler(string, context):
     return [(imi, args[1], args[2])]
 
 OP_ASM_MAP = {}
-def op_asm_handler(op, args, asm, context):
+def op_asm_handler(op, args, asm, context: IRSystem.BlockContext):
     """Handle operators assembly"""
-    print(f"Declartion for op: {op}")
-    print(f"Args: {args}")
+
+    loc = context.name
+
+    print(f"Declartion for op: {op} at {loc}")
+
     lines = block_handler(asm)
 
-    loc = context.get_global_prefix()
     if loc in OP_ASM_MAP:
         OP_ASM_MAP[loc][op] = lines
     else:
@@ -186,27 +162,91 @@ def op_asm_handler(op, args, asm, context):
 
     return []
 
-def op_handler(left, op, right, context):
-    loc = context.get_global_prefix()
+def op_handler(left, op, right, context: IRSystem.BlockContext):
+    print(f"Handling op: {op}")
+    namespace = context.get_global_prefix()
+
+    ltype = context.get_variable_type(left)
+    rtype = context.get_variable_type(right)
+
+    left_reg = context.get_variable_register(left)
+    right_reg = context.get_variable_register(right)
+
+    try:
+        int(right)
+        right_reg = right
+    except:
+        pass
+
+    loc = ltype
     if loc in OP_ASM_MAP:
         if op in OP_ASM_MAP[loc]:
             lines = OP_ASM_MAP[loc][op]
         else:
             print(f"Operation not declared: {op}")
-            return [];
+            return []
     else:
         print(f"No ops found for namespace: {loc}")
-        return [];
+        return []
+    
     final = []
-    left_reg = context.get_variable_register(left)
-    right_reg = context.get_variable_register(right)
     result_reg = context.vreg.new_vreg()
-    for i in lines:
-        s = i.replace("left", left_reg).replace("right", right_reg).replace("result", result_reg)
-        final.append(s)
-    print(final)
+    context.update_variable_register("op_temp", result_reg)
+    for line in lines:
+        nl = []
+        for i in line:
+            if type(i) is str:
+                s = i.replace("left", left_reg).replace("right", right_reg).replace("result", result_reg)
+                nl.append(s)
+            else:
+                nl.append(i)
+        final.append(tuple(nl))
     return final
 
+def multi_op_handler(left, op, right, context: IRSystem.BlockContext):
+    print(f"Multi op: {op}")
+    namespace = context.get_global_prefix()
+
+    r = block_handler(right, context=context)
+
+    ltype = context.get_variable_type(left)
+    rtype = context.get_variable_type("op_temp")
+
+    left_reg = context.get_variable_register(left)
+    right_reg = context.get_variable_register("op_temp")
+
+    try:
+        int(right)
+        right_reg = right
+    except:
+        pass
+
+    loc = ltype
+    if loc in OP_ASM_MAP:
+        if op in OP_ASM_MAP[loc]:
+            lines = OP_ASM_MAP[loc][op]
+        else:
+            print(f"Operation not declared: {op}")
+            return []
+    else:
+        print(f"No ops found for namespace: {loc}")
+        return []
+    
+    final = []
+    result_reg = context.vreg.new_vreg()
+    context.update_variable_register("op_temp", result_reg)
+    for line in lines:
+        nl = []
+        for i in line:
+            if type(i) is str:
+                s = i.replace("left", left_reg).replace("right", right_reg).replace("result", result_reg)
+                nl.append(s)
+            else:
+                nl.append(i)
+        final.append(tuple(nl))
+    r.extend(final)
+    print("OP ASM: ", r)
+    return r
 
 
 TEMPLATES_HANDLERS = [
@@ -218,13 +258,15 @@ TEMPLATES_HANDLERS = [
 
 ("call $name( *args )", call_handler),
 
+("$name: $type", declaration_handler),
 ("new $name: $type", declaration_handler),
 
-("$name = *value", assignment_handler),
+("$left $op ( *right )", multi_op_handler),
 
 ("$left $op $right", op_handler),
 
 ("_op_asm $op ( *args ) { *asm }", op_asm_handler),
+
 ("_asm $string", asm_handler),
 
 ]
@@ -252,6 +294,10 @@ def get_template_handlers():
 template_handlers = get_template_handlers()
 parsed_templates = get_parsed_templates()
 
+
+def unknown_func(*args):
+    print("Unknown handler for: ", *args)
+
 @staticmethod
 def block_handler(block, context=None):
     """Handle code blocks."""
@@ -262,11 +308,10 @@ def block_handler(block, context=None):
     for idx in range(0, len(block)):
         item = block[idx]
 
-        values, handler = [], print
-            
+        values, handler = [], unknown_func
         for key, val in item:
             if key == "#":
-                handler = template_handlers[val + 1]
+                handler = template_handlers[val]
             else:
                 values.append(val)
             
@@ -274,6 +319,7 @@ def block_handler(block, context=None):
             result = handler(*values, context)
 
             if result:
+                print(result)
                 instructions.extend(result)
         except Exception as e:
             print(f"Error in {handler.__name__}: {e}")

@@ -1,28 +1,68 @@
-"""Token parser and lexer for the custom language."""
+"""Token parser and lexer for the custom language.
+
+Token Format:
+    Tokens are tuples of (token_type, value):
+    - (TOKEN_TEXT, "text")           : Regular text
+    - (TOKEN_SEPARATOR, ";")         : Statement separator
+    - (TOKEN_STAR, "content")        : Star-prefixed content (wildcard, can be empty)
+    - (TOKEN_DOLLAR, "content")      : Dollar-prefixed content (wildcard, can be empty)
+    - (TOKEN_RAW, "content")         : Tilde-prefixed raw content (no matching)
+    - (TOKEN_STRING, "content")      : String literal
+    - (TOKEN_TEMPLATE, template_id)  : Template reference (#N or #*)
+    - (BOUNDING_TYPE, [tokens])      : Bounded block like (), [], {}
+"""
 
 from config import BOUNDINGS, ParseError, get_special_chars
 from reader import Reader
 
 
+# Token type constants
+TOKEN_TEXT = "t"
+TOKEN_SEPARATOR = "b"
+TOKEN_STAR = "*"
+TOKEN_DOLLAR = "$"
+TOKEN_RAW = "~"
+TOKEN_STRING = "string"
+TOKEN_TEMPLATE = "#"
+
+# Special character handlers
+SPECIAL_HANDLERS = {
+    "*": TOKEN_STAR,
+    "$": TOKEN_DOLLAR,
+    "~": TOKEN_RAW,
+}
+
+
 def get_bounded_block_end(fileio, bounding_chars):
-    """Find the end of a bounded block (e.g., matching parentheses)."""
-    c = fileio.read()
-    if c != bounding_chars[0]:
+    """Find the end of a bounded block (e.g., matching parentheses).
+    
+    Args:
+        fileio: Reader object for file I/O
+        bounding_chars: Tuple of (opening, closing) characters
+        
+    Returns:
+        int: Number of characters to the end of the block
+        
+    Raises:
+        ParseError: If block is unclosed or malformed
+    """
+    char = fileio.read()
+    if char != bounding_chars[0]:
         raise ParseError(f"Expected '{bounding_chars[0]}' at position {fileio.pos()}")
     
     depth = 1
     chars_read = 0
     
     while depth > 0:
-        c = fileio.read()
+        char = fileio.read()
         chars_read += 1
         
-        if not c:
+        if not char:
             raise ParseError("Unexpected EOF: unclosed bounded block")
         
-        if c == bounding_chars[1]:
+        if char == bounding_chars[1]:
             depth -= 1
-        elif c == bounding_chars[0]:
+        elif char == bounding_chars[0]:
             depth += 1
     
     fileio.back(chars_read)
@@ -34,125 +74,204 @@ def remove_spaces(text):
     return text.lstrip()
 
 
-def parse(fileio):
-    """Parse input text into token tree."""
-    final = []
-    buf = ""
-    temp_type = "t"
-    specials = get_special_chars()
+def parse_string_literal(fileio):
+    """Parse a string literal with escape sequences.
     
-    c = fileio.read()
-    while c:
-        if c in specials:
-            if buf.strip():
-                final.append((temp_type, buf))
+    Args:
+        fileio: Reader object positioned after opening quote
+        
+    Returns:
+        str: The parsed string content
+        
+    Raises:
+        ParseError: If string is unclosed
+    """
+    string_buffer = ""
+    char = fileio.read()
+    
+    while char and char != '"':
+        if char == '\\':
+            next_char = fileio.read()
+            escape_sequences = {
+                'n': '\n',
+                't': '\t',
+                '\\': '\\',
+                '"': '"'
+            }
+            string_buffer += escape_sequences.get(next_char, next_char)
+            char = fileio.read()
+        else:
+            string_buffer += char
+            char = fileio.read()
+    
+    if char != '"':
+        raise ParseError("Unexpected EOF: unclosed string literal")
+    
+    return string_buffer
+
+
+def parse_template_reference(fileio):
+    """Parse a template reference (#N or #*).
+    
+    Args:
+        fileio: Reader object positioned after '#'
+        
+    Returns:
+        tuple: (TOKEN_TEMPLATE, template_id) where id is int or "*"
+        
+    Raises:
+        ParseError: If template reference is invalid
+    """
+    reference = fileio.read(2)
+    
+    if reference and len(reference) >= 1 and reference[0] == "*":
+        return (TOKEN_TEMPLATE, "*")
+    
+    try:
+        template_id = int(reference)
+        return (TOKEN_TEMPLATE, template_id)
+    except ValueError:
+        raise ParseError(f"Invalid template id '#{reference}'")
+
+
+def parse_bounded_block(fileio, bounding_chars):
+    """Parse a bounded block (parentheses, brackets, braces).
+    
+    Args:
+        fileio: Reader object positioned before opening bounding char
+        bounding_chars: Tuple of (opening, closing) characters
+        
+    Returns:
+        tuple: (bounding_type, parsed_tokens) where bounding_type is like "()"
+    """
+    block_end = get_bounded_block_end(fileio, bounding_chars)
+    block_content = fileio.read(block_end - 1)
+    block_content = remove_spaces(block_content)
+    
+    reader = Reader()
+    reader.load_text(block_content)
+    parsed_tokens = parse(reader)
+    
+    bounding_type = f"{bounding_chars[0]}{bounding_chars[1]}"
+    return (bounding_type, parsed_tokens)
+
+
+def handle_special_character(char, fileio):
+    """Handle special single characters that become tokens.
+    
+    Args:
+        char: The special character
+        fileio: Reader object for reading additional chars if needed
+        
+    Returns:
+        tuple: (token_type, value) or None if char doesn't create a complete token
+    """
+    if char == ";":
+        return (TOKEN_SEPARATOR, ";")
+    elif char == ",":
+        return (TOKEN_SEPARATOR, ",")
+    elif char == ".":
+        return (TOKEN_TEXT, ".")
+    elif char == ":":
+        return (TOKEN_TEXT, ":")
+    
+    return None
+
+
+def parse(fileio):
+    """Parse input text into token tree.
+    
+    Args:
+        fileio: Reader object containing the text to parse
+        
+    Returns:
+        list: List of tokens as (type, value) tuples
+    """
+    tokens = []
+    buffer = ""
+    current_token_type = TOKEN_TEXT
+    special_chars = get_special_chars()
+    
+    char = fileio.read()
+    while char:
+        if char in special_chars:
+            # Flush any buffered text (wildcards can be empty, so flush even if buffer is empty)
+            if buffer.strip() or current_token_type in (TOKEN_STAR, TOKEN_DOLLAR, TOKEN_RAW):
+                tokens.append((current_token_type, buffer))
             
-            temp_type = "t"
-            buf = ""
+            current_token_type = TOKEN_TEXT
+            buffer = ""
 
             # Handle string literals
-            if c == '"':
-                string_buf = ""
-                c = fileio.read()
-                while c and c != '"':
-                    if c == '\\':
-                        next_c = fileio.read()
-                        if next_c == 'n':
-                            string_buf += '\n'
-                        elif next_c == 't':
-                            string_buf += '\t'
-                        elif next_c == '\\':
-                            string_buf += '\\'
-                        elif next_c == '"':
-                            string_buf += '"'
-                        else:
-                            string_buf += next_c
-                        c = fileio.read()
-                    else:
-                        string_buf += c
-                        c = fileio.read()
-                
-                if c != '"':
-                    raise ParseError("Unexpected EOF: unclosed string literal")
-                
-                final.append(("string", string_buf))
-                c = fileio.read()
+            if char == '"':
+                string_content = parse_string_literal(fileio)
+                tokens.append((TOKEN_STRING, string_content))
+                char = fileio.read()
                 continue
 
-            # Handle special single characters
-            if c == "*":
-                temp_type = "*"
-            elif c == "$":
-                temp_type = "$"
-            elif c == ";":
-                final.append(("b", ";"))
-                c = fileio.read()
+            # Handle template references
+            if char == "#":
+                template_token = parse_template_reference(fileio)
+                tokens.append(template_token)
+                char = fileio.read()
                 continue
-            elif c == ".":
-                final.append(("t", "."))
-                c = fileio.read()
+            
+            # Handle simple special characters
+            simple_token = handle_special_character(char, fileio)
+            if simple_token:
+                tokens.append(simple_token)
+                char = fileio.read()
                 continue
-            elif c == ":":
-                final.append(("t", ":"))
-                c = fileio.read()
-                continue
-            elif c == "#":
-                s = fileio.read(2)
-                if s and len(s) >= 1 and s[0] == "*":
-                    final.append(("#", "*"))
-                    c = s[1] if len(s) > 1 else fileio.read()
-                    continue
-                try:
-                    template_id = int(s)
-                    final.append(("#", template_id))
-                except ValueError:
-                    raise ParseError(f"Invalid template id '#{s}'")
-                c = fileio.read()
+            
+            # Handle token type modifiers
+            if char in SPECIAL_HANDLERS:
+                current_token_type = SPECIAL_HANDLERS[char]
+                char = fileio.read()
                 continue
             
             # Handle bounded blocks
-            is_bounding = False
+            bounded_token = None
             for bounding in BOUNDINGS:
-                if c == bounding[0]:
+                if char == bounding[0]:
                     fileio.back()
-                    block_end = get_bounded_block_end(fileio, bounding)
-                    block = fileio.read(block_end - 1)
-                    block = remove_spaces(block)
-
-                    reader = Reader()
-                    reader.load_text(block)
-                    parsed = parse(reader)
-
-                    final.append((f"{bounding[0]}{bounding[1]}", parsed))
-                    is_bounding = True
+                    bounded_token = parse_bounded_block(fileio, bounding)
                     break
             
-            if is_bounding:
-                c = fileio.read()
+            if bounded_token:
+                tokens.append(bounded_token)
+                char = fileio.read()
                 continue
         else:
-            buf += c
+            buffer += char
 
-        c = fileio.read()
+        char = fileio.read()
 
-    if buf.strip():
-        final.append((temp_type, buf))
+    # Flush any remaining buffered text
+    if buffer.strip():
+        tokens.append((current_token_type, buffer))
 
-    return final
+    return tokens
 
 
 def split_sentences(tokens):
-    """Split tokens into sentences based on separators."""
+    """Split tokens into sentences based on separators.
+    
+    Args:
+        tokens: List of parsed tokens
+        
+    Returns:
+        list: List of token lists, one per sentence
+    """
     sentences = []
-    start = 0
+    start_index = 0
     
-    for k, (token_type, _) in enumerate(tokens):
-        if token_type == "b":
-            if start < k:
-                sentences.append(tokens[start:k])
-            start = k + 1
+    for index, (token_type, _) in enumerate(tokens):
+        if token_type == TOKEN_SEPARATOR:
+            if start_index < index:
+                sentences.append(tokens[start_index:index])
+            start_index = index + 1
     
-    if start < len(tokens):
-        sentences.append(tokens[start:])
+    if start_index < len(tokens):
+        sentences.append(tokens[start_index:])
     
-    return [s for s in sentences if s]
+    return [sentence for sentence in sentences if sentence]
