@@ -25,7 +25,30 @@ class IRSystem:
         def free_reg(self, reg):
             """Mark register as freed."""
             self.freed.append(reg)
-    
+
+    class MetaPipe:
+        def __init__(self):
+            self.pipes = {}
+        
+        def push(self, data, pipe="default"):
+            print(f"{data} pushed to pipe.")
+            if pipe not in self.pipes:
+                self.pipes[pipe] = []
+
+            self.pipes[pipe].append(data)
+            print(f"Pipe: {self.pipes[pipe]}")
+
+        
+        def pop(self, pipe="default"):
+            if pipe not in self.pipes:
+                print(f"Pipe not found: {pipe}")
+                return None
+            if len(self.pipes[pipe]) == 0:
+                print("Nothing in pipe! check your logic!")
+                return None
+            return self.pipes[pipe].pop()
+        
+
     class TypeManager:
         def __init__(self):
             self.typemap = {}
@@ -35,6 +58,9 @@ class IRSystem:
                 print(f"Error: Type already registered: {name}")
                 return
             self.typemap[name] = {}
+        
+        def get_types(self):
+            return self.typemap.keys()
                     
 
     class BlockContext:
@@ -45,20 +71,34 @@ class IRSystem:
             self.vreg = IRSystem.VirtualRegisterManager()
 
             self.variables = {}
-            self.types = {}
+            self.types = IRSystem.TypeManager()
             
             self.memory_start_reg = self.vreg.new_vreg()
 
 
             self.memory_used = 0
 
-            self.pipe = []
+            self.pipe = IRSystem.MetaPipe()
             self.parent = parent
 
         def get_memory(self, size):
             m = self.memory_used
             self.memory_used += size
             return m
+
+        def get_type(self, value):
+            n = self.get_variable_type(value)
+            if n : return n
+            try:
+                int(value)
+                return "int"
+            except ValueError:
+                pass
+            if value.startswith("v"):
+                g = value[1:]
+                return "reg"
+            return None
+
 
         def get_variable_register(self, var_name):
             """Get register for variable."""
@@ -92,7 +132,7 @@ class IRSystem:
             """Update variable register."""
             if var_name not in self.variables:
                 self.variables[var_name] = {}
-            if vtype not in self.types:
+            if vtype not in self.types.get_types():
                 print(f"Error: Invalid type: {vtype}")
                 return
             self.variables[var_name]["type"] = vtype
@@ -100,6 +140,7 @@ class IRSystem:
         def create_child_context(self, name):
             """Create child context."""
             child = IRSystem.BlockContext(parent=self, name=name)
+            child.pipe = self.pipe
             child.types = self.types
             child.vreg = self.vreg
             return child

@@ -223,11 +223,12 @@ def single_template_match(tokens: List[Tuple], template: List[Tuple],
             
             # Check if next token ends wildcard
             if pi < len(template) - 1:
-                next_type, next_val = template[pi + 1]
-                log(f"    Next pattern: ({next_type}, {next_val})")
+                next_pattern = template[pi + 1]
+                current_token = tokens[ti]
+                log(f"    Next pattern: {next_pattern}")
                 
-                if next_type == act_type and next_val == act_val:
-                    #TODO: handle variables with specified characters, or move the single token matching to seperate function..
+                success, matched = single_template_match([current_token], [next_pattern], parsed_templates, template_groups, debug)
+                if success:
                     log(f"    Wildcard boundary detected!")
                     matches = _match_wildcard(
                         parsed_templates,
@@ -236,14 +237,15 @@ def single_template_match(tokens: List[Tuple], template: List[Tuple],
                         wildcard_spec,
                         debug
                     )
+                    
                     if matches is None:
                         log(f"  ✖ FAILED: Wildcard {wildcard_spec} did not match buffer")
                         return False, []
                     result.add_capture(wildcard_spec.name, matches)
                     log(f"  ✔ Captured wildcard {wildcard_spec}: {len(matches)} matches")
                     wildcard_buf = []
-                    ti += 1
-                    pi += 2
+                    #ti += 1
+                    pi += 1
                     continue
             
             # Wildcard at end - consume all remaining tokens

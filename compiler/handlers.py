@@ -15,7 +15,7 @@ def class_handler(name, block, context: IRSystem.BlockContext):
     class_context = context.create_child_context(name)
     code = block_handler(block, class_context)
 
-    context.types[name] = {'size': 4}
+    context.types.typemap[name] = {'size': 4}
 
     return code
 
@@ -127,6 +127,7 @@ def addto_handler(left, right, context):
 def declaration_handler(name, var_type, context: IRSystem.BlockContext):
     """Handle variable declarations."""
     reg = context.vreg.new_vreg()
+    print("AAAA", name)
     context.update_variable_register(name, reg)
     context.set_variable_type(name, var_type)
     print(f"Declared '{name}': {var_type} in {reg}")
@@ -180,10 +181,17 @@ def op_asm_handler(op, asm, context: IRSystem.BlockContext):
     return []
 
 def op_handler(left, op, right, context: IRSystem.BlockContext):
-    print(f"Handling op: {op}")
     namespace = context.get_global_prefix()
 
-    ltype = context.get_variable_type(left)
+    print("OPPP", left, right)
+    ltype = context.get_type(left)
+    rtype = context.get_type(right)
+
+    print(f"Handling op: {left}:{ltype} {op} {right}:{rtype}")
+
+    left_reg = left
+    right_reg = right
+
     loc = ltype
 
     if loc in OP_ASM_MAP:
@@ -196,10 +204,6 @@ def op_handler(left, op, right, context: IRSystem.BlockContext):
         print(f"No ops found for namespace: {loc}")
         return []
 
-    rtype = context.get_variable_type(right)
-
-    left_reg = context.get_variable_register(left)
-    right_reg = context.get_variable_register(right)
 
     try:
         int(right)
@@ -213,9 +217,8 @@ def op_handler(left, op, right, context: IRSystem.BlockContext):
     if op_data["result"]:
         result_reg = context.vreg.new_vreg()
     
-    print("AAA")
-    context.pipe.append(result_reg)
-
+    if result_reg:
+        context.pipe.push(result_reg)
     final = []
 
     for line in op_data["asm"]:
@@ -238,16 +241,19 @@ def op_handler(left, op, right, context: IRSystem.BlockContext):
     return final
 
 def multi_op_handler(left, op, right, context: IRSystem.BlockContext):
-    print(f"Multi op: {op}")
     namespace = context.get_global_prefix()
 
-    r = block_handler(right, context=context)
-
-    final = op_handler(left, op, context.pipe.pop(), context=context)
-    r.extend(final)
+    print(f"[{namespace}] Multi op: {left} {op} {right}")
 
 
-    return r
+    r_code = block_handler(right, context=context)
+
+    l_code = block_handler(left, context=context)
+
+    op_code = op_handler(context.pipe.pop(), op, context.pipe.pop(), context=context)
+
+
+    return [*r_code, *l_code, *op_code]
 
 def array_declaration_handler(name, size, typ, context):
     code = []
@@ -257,29 +263,43 @@ def array_declaration_handler(name, size, typ, context):
     code.append(IRSystem.ib.add(reg, offset).to_tuple())
 
     #TODO: malloc and set reg to ptr of arr[0]
-    final_size = context.types[typ]['size'] * size
+    final_size = context.types.typemap[typ]['size'] * size
     context.update_variable_register(name, reg)
     context.set_variable_type(name, typ)
     print(f"Declared '{name}': {typ} with size {size} in {reg}")
     return code
 
-def ref_handler(name, context):
-    reg = context.get_variable_register(name)
-    context.update_variable_register(f"temp", reg)
+def name_handler(name, context: IRSystem.BlockContext):
+    try:
+        reg = int(name)
+    except ValueError:
+        reg = context.get_variable_register(name)
+        if not reg:
+            print(f"Warning: variable not found: {name}")
+    context.pipe.push(reg)
+    print("NAME: ", name, reg)
 
 
-def ref_index_handler(name, index, context: IRSystem.BlockContext):
+def child_handler(parent, child, context: IRSystem.BlockContext):
+    reg = context.get_variable_register(parent) #register with pointer to parent
+    #TODO: get memory map of class and calculate offsets for expressions or name for func calls (maybe later reduced to offset)
+    context.pipe.push(reg)
+
+def name_index_handler(name, index, context: IRSystem.BlockContext):
     print("ref index handler")
     code = []
+
     n = context.vreg.new_vreg()
-    c = context.get_variable_register(name)
+
+    f = block_handler(name, context=context)
+    c = context.pipe.pop()
 
     i_reg = context.get_variable_register(index)
     code.append(IRSystem.ib.move(n, c).to_tuple())
     code.append(IRSystem.ib.add(n, i_reg or index).to_tuple())
     code.append(IRSystem.ib.load(n, n).to_tuple())
 
-    context.update_variable_register(f"temp", n)
+    context.pipe.push(n)
 
     return code
 
@@ -294,13 +314,10 @@ def while_handler(cond, block, context):
 
 def expr_handler(expr, context):
     print("EXPR:", expr)
-    exit()
+    r = block_handler(expr, context=context)
+    return r
 
-    try:
-        val = int(expr)
-        context.pipe.append(val)
-    except ValueError:
-        pass
+
 
 
 
@@ -429,9 +446,19 @@ TEMPLATES = [
             (WILDCARD, ("right", ["name", "expr"]))
         ],
         ["expr"],
-        declaration_handler
+        multi_op_handler
     ),
 
+    # (*expr)
+    (
+        [
+            (PAREN_START + PAREN_END, (
+                (WILDCARD, ("expr", ["expr"])),)
+            )
+        ],
+        ["expr"],
+        expr_handler,
+    ),
     # *name[$index]
     (
         [
@@ -439,7 +466,7 @@ TEMPLATES = [
             (BRACKET_START + BRACKET_END, [(VARIABLE, "index")]),
         ],
         ["name"],
-        declaration_handler
+        name_index_handler
     ),
 
     # $parent.$child
@@ -449,8 +476,8 @@ TEMPLATES = [
             (SYMBOL, "."),
             (VARIABLE, "child"),
         ],
-        ["base_name, name"],
-        declaration_handler
+        ["base_name", "name"],
+        child_handler
     ),
 
     # $name
@@ -458,48 +485,9 @@ TEMPLATES = [
         [
             (VARIABLE, "name")
         ],
-        ["base_name, name"],
-        declaration_handler
+        ["base_name", "name"],
+        name_handler
     ),
-
-]
-
-
-TEMPLATES_HANDLERS = [
-
-("class $name { *block }", ["main"],class_handler),
-
-("func $name( *args ) { *block }", ["main"], func_handler),
-("return $value", ["main"], return_handler),
-
-("if ( *cond ) { *block }", ["main"], if_handler),
-("while ( *cond ) { *block }", ["main"], while_handler),
-
-
-("_op_asm $op { *asm }", ["main"], op_asm_handler),
-
-("_asm $string", ["main"], asm_handler),
-
-("new $name[$size]: $type", ["main"], array_declaration_handler),
-("new $name: $type", ["main"], declaration_handler),
-
-#("$left $op *right", multi_op_handler),
-
-("$expr", expr_handler),
-
-("(**expr)", expr_handler)
-]
-
-T = [
-("$name.$child( *args )", child_call_handler),
-
-("$name( *args )", call_handler),
-
-
-
-("$name", ref_handler),
-("$name[ $index ]", ref_index_handler),
-
 
 ]
 
