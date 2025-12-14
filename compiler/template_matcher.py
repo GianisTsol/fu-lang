@@ -1,9 +1,8 @@
-"""Template matching system for pattern recognition."""
-from typing import List, Tuple, Optional
+"""Template matching system with wildcard group filtering."""
+from typing import List, Tuple, Optional, Set, Union
 from dataclasses import dataclass
 from parser import split_sentences, parse as parse_tokens
 from reader import Reader
-from handlers import get_parsed_templates
 
 # Token type constants
 VARIABLE = "$"
@@ -32,34 +31,111 @@ class MatchResult:
     def add_capture(self, name: str, value: any):
         self.captures.append((name, value))
 
-parsed_templates = get_parsed_templates()
+@dataclass
+class WildcardSpec:
+    """Represents a wildcard with optional group filtering."""
+    name: str
+    groups: Optional[Set[Union[int, str]]]  # None means match all groups
+    
+    @classmethod
+    def parse(cls, wildcard_value: any) -> 'WildcardSpec':
+        """
+        Parse wildcard specification.
+        
+        Formats supported:
+        - "name" -> matches all template groups
+        - ("name", [0, 1, 2]) -> matches only templates in groups 0, 1, 2
+        - ("name", ["noun", "verb"]) -> matches only templates in named groups
+        """
+        if isinstance(wildcard_value, str):
+            return cls(name=wildcard_value, groups=None)
+        elif isinstance(wildcard_value, tuple) and len(wildcard_value) == 2:
+            name, groups = wildcard_value
+            if groups is None:
+                return cls(name=name, groups=None)
+            return cls(name=name, groups=set(groups))
+        else:
+            raise ValueError(f"Invalid wildcard specification: {wildcard_value}")
+    
+    def __str__(self):
+        if self.groups is None:
+            return f"*{self.name}"
+        return f"*{self.name}[{','.join(map(str, self.groups))}]"
 
-def _match_wildcard(tokens: List[Token], wildcard_name: str, debug: bool) -> Optional[List]:
-    """Match wildcard content against templates."""
+def _filter_templates_by_groups(parsed_templates, template_groups, allowed_groups: Optional[Set]) -> List[Tuple[int, List]]:
+    """
+    Filter templates by group membership.
+    
+    Args:
+        parsed_templates: List of template patterns
+        template_groups: Dict mapping template index to group(s)
+        allowed_groups: Set of allowed group identifiers, or None for all
+        
+    Returns:
+        List of (template_index, template_pattern) tuples
+    """
+    if allowed_groups is None:
+        # No filtering - return all templates with their indices
+        return list(enumerate(parsed_templates))
+    
+    filtered = []
+    for idx, template in enumerate(parsed_templates):
+        # Get groups for this template
+        groups = set(template_groups.get(idx))
+        
+        # Check if template belongs to any allowed group
+        if allowed_groups & groups:  # Set intersection
+            filtered.append((idx, template))
+    
+    return filtered
+
+def _match_wildcard(parsed_templates, template_groups, tokens: List[Token], 
+                    wildcard_spec: WildcardSpec, debug: bool) -> Optional[List]:
+    """Match wildcard content against templates, optionally filtered by group."""
     log = print if debug else lambda *a: None
     
     if not tokens:
-        log(f"  ↳ Wildcard *{wildcard_name}: Empty token list, returning []")
+        log(f"  ↳ Wildcard {wildcard_spec}: Empty token list, returning []")
         return []
     
-    log(f"  ↳ Wildcard *{wildcard_name}: Attempting to match {len(tokens)} tokens")
+    log(f"  ↳ Wildcard {wildcard_spec}: Attempting to match {len(tokens)} tokens")
+    
+    # Filter templates by group if specified
+    filtered_templates = _filter_templates_by_groups(
+        parsed_templates, 
+        template_groups, 
+        wildcard_spec.groups
+    )
+    
+    if wildcard_spec.groups is not None:
+        log(f"  ↳ Filtered to {len(filtered_templates)} templates in groups {wildcard_spec.groups}")
+    
     token_tuples = [t.to_tuple() for t in tokens]
-    results = template_match(parsed_templates, token_tuples, debug)
+    results = template_match_filtered(
+        parsed_templates, 
+        template_groups,
+        token_tuples, 
+        filtered_templates,
+        debug
+    )
     
     if results:
-        log(f"  ↳ Wildcard *{wildcard_name}: Successfully matched {len(results)} templates")
+        log(f"  ↳ Wildcard {wildcard_spec}: Successfully matched {len(results)} templates")
     else:
-        log(f"  ↳ Wildcard *{wildcard_name}: No template matches found")
+        log(f"  ↳ Wildcard {wildcard_spec}: No template matches found")
     
     return results if results else None
 
-def single_template_match(tokens: List[Tuple], template: List[Tuple], debug: bool = False) -> Tuple[bool, List]:
+def single_template_match(tokens: List[Tuple], template: List[Tuple], 
+                          parsed_templates, template_groups, debug: bool = False) -> Tuple[bool, List]:
     """
     Match a single template against tokens.
     
     Args:
         tokens: List of (type, value) token tuples
         template: List of (type, value) template pattern tuples
+        parsed_templates: List of all template patterns
+        template_groups: Dict mapping template index to group(s)
         debug: Enable debug logging
         
     Returns:
@@ -89,13 +165,20 @@ def single_template_match(tokens: List[Tuple], template: List[Tuple], debug: boo
         if ti >= len(tokens):
             log(f"  Status: Reached end of tokens")
             if exp_type == WILDCARD:
-                log(f"  Action: Processing final wildcard *{exp_val}")
-                matches = _match_wildcard([Token.from_tuple(t) for t in wildcard_buf], exp_val, debug)
+                log(f"  Action: Processing final wildcard {exp_val}")
+                wildcard_spec = WildcardSpec.parse(exp_val)
+                matches = _match_wildcard(
+                    parsed_templates, 
+                    template_groups,
+                    [Token.from_tuple(t) for t in wildcard_buf], 
+                    wildcard_spec,
+                    debug
+                )
                 if matches is None:
-                    log(f"  ✖ FAILED: Wildcard *{exp_val} did not match")
+                    log(f"  ✖ FAILED: Wildcard {wildcard_spec} did not match")
                     return False, []
-                result.add_capture(exp_val, matches)
-                log(f"  ✔ Captured wildcard *{exp_val}: {len(matches)} matches")
+                result.add_capture(wildcard_spec.name, matches)
+                log(f"  ✔ Captured wildcard {wildcard_spec}: {len(matches)} matches")
                 pi += 1
                 continue
             log(f"  ✖ FAILED: Out of tokens at position {ti}")
@@ -106,9 +189,17 @@ def single_template_match(tokens: List[Tuple], template: List[Tuple], debug: boo
 
         # Variable capture
         if exp_type == VARIABLE:
-            log(f"  Action: Capturing variable ${exp_val}")
-            result.add_capture(exp_val, act_val)
-            log(f"  ✔ Captured ${exp_val} = {act_val}")
+            if isinstance(exp_val, tuple):
+                name = exp_val[0]
+                chars = exp_val[1]
+                if act_val not in chars:
+                    return False, []
+            else:
+                name = exp_val
+
+            log(f"  Action: Capturing matched variable ${name}")
+            result.add_capture(name, act_val)
+            log(f"  ✔ Captured ${name} = {act_val}")
             ti += 1
             pi += 1
         
@@ -126,7 +217,8 @@ def single_template_match(tokens: List[Tuple], template: List[Tuple], debug: boo
         
         # Wildcard matching
         elif exp_type == WILDCARD:
-            log(f"  Action: Processing wildcard *{exp_val}")
+            wildcard_spec = WildcardSpec.parse(exp_val)
+            log(f"  Action: Processing wildcard {wildcard_spec}")
             log(f"    Wildcard buffer: {wildcard_buf}")
             
             # Check if next token ends wildcard
@@ -135,13 +227,20 @@ def single_template_match(tokens: List[Tuple], template: List[Tuple], debug: boo
                 log(f"    Next pattern: ({next_type}, {next_val})")
                 
                 if next_type == act_type and next_val == act_val:
+                    #TODO: handle variables with specified characters, or move the single token matching to seperate function..
                     log(f"    Wildcard boundary detected!")
-                    matches = _match_wildcard([Token.from_tuple(t) for t in wildcard_buf], exp_val, debug)
+                    matches = _match_wildcard(
+                        parsed_templates,
+                        template_groups,
+                        [Token.from_tuple(t) for t in wildcard_buf],
+                        wildcard_spec,
+                        debug
+                    )
                     if matches is None:
-                        log(f"  ✖ FAILED: Wildcard *{exp_val} did not match buffer")
+                        log(f"  ✖ FAILED: Wildcard {wildcard_spec} did not match buffer")
                         return False, []
-                    result.add_capture(exp_val, matches)
-                    log(f"  ✔ Captured wildcard *{exp_val}: {len(matches)} matches")
+                    result.add_capture(wildcard_spec.name, matches)
+                    log(f"  ✔ Captured wildcard {wildcard_spec}: {len(matches)} matches")
                     wildcard_buf = []
                     ti += 1
                     pi += 2
@@ -152,12 +251,18 @@ def single_template_match(tokens: List[Tuple], template: List[Tuple], debug: boo
                 log(f"    Wildcard is at end of pattern")
                 log(f"    Consuming remaining {len(tokens) - ti} tokens")
                 wildcard_buf.extend(tokens[ti:])
-                matches = _match_wildcard([Token.from_tuple(t) for t in wildcard_buf], exp_val, debug)
+                matches = _match_wildcard(
+                    parsed_templates,
+                    template_groups,
+                    [Token.from_tuple(t) for t in wildcard_buf],
+                    wildcard_spec,
+                    debug
+                )
                 if matches is None:
-                    log(f"  ✖ FAILED: Wildcard *{exp_val} did not match")
+                    log(f"  ✖ FAILED: Wildcard {wildcard_spec} did not match")
                     return False, []
-                result.add_capture(exp_val, matches)
-                log(f"  ✔ Captured wildcard *{exp_val}: {len(matches)} matches")
+                result.add_capture(wildcard_spec.name, matches)
+                log(f"  ✔ Captured wildcard {wildcard_spec}: {len(matches)} matches")
                 log(f"\n{'='*60}")
                 log(f"✔ MATCH SUCCESSFUL")
                 log(f"{'='*60}")
@@ -179,7 +284,9 @@ def single_template_match(tokens: List[Tuple], template: List[Tuple], debug: boo
                 return False, []
             
             log(f"    Recursing into block content...")
-            block_valid, block_captures = single_template_match(act_val, exp_val, debug)
+            block_valid, block_captures = single_template_match(
+                act_val, exp_val, parsed_templates, template_groups, debug
+            )
             if not block_valid:
                 log(f"  ✖ FAILED: Block content mismatch")
                 return False, []
@@ -218,13 +325,17 @@ def single_template_match(tokens: List[Tuple], template: List[Tuple], debug: boo
     log(f"Captures: {result.captures}\n")
     return True, result.captures
 
-def template_match(parsed_templates: List, tokens: List[Tuple], debug: bool = False) -> List:
+def template_match_filtered(parsed_templates: List, template_groups: dict,
+                            tokens: List[Tuple], filtered_templates: List[Tuple[int, List]],
+                            debug: bool = False) -> List:
     """
-    Match tokens against all registered templates.
+    Match tokens against filtered templates.
     
     Args:
-        parsed_templates: List of template patterns
+        parsed_templates: List of all template patterns
+        template_groups: Dict mapping template index to group(s)
         tokens: List of (type, value) token tuples to match
+        filtered_templates: List of (index, template) tuples to try
         debug: Enable debug logging
         
     Returns:
@@ -235,11 +346,11 @@ def template_match(parsed_templates: List, tokens: List[Tuple], debug: bool = Fa
     
     sentences = split_sentences(tokens)
     log(f"\n{'#'*60}")
-    log(f"TEMPLATE MATCHING SESSION")
+    log(f"FILTERED TEMPLATE MATCHING")
     log(f"{'#'*60}")
     log(f"Input tokens: {tokens}")
     log(f"Split into {len(sentences)} sentence(s)")
-    log(f"Available templates: {len(parsed_templates)}")
+    log(f"Filtered templates: {len(filtered_templates)}")
     log(f"{'#'*60}\n")
     
     for s_idx, sent in enumerate(sentences):
@@ -247,7 +358,7 @@ def template_match(parsed_templates: List, tokens: List[Tuple], debug: bool = Fa
         log(f"Tokens: {sent}")
         log(f"Length: {len(sent)}")
         
-        for t_idx, tmpl in enumerate(parsed_templates):
+        for t_idx, tmpl in filtered_templates:
             # Quick length check
             if len(tmpl) > len(sent):
                 log(f"  Template {t_idx}: Skipped (too long: {len(tmpl)} > {len(sent)})")
@@ -256,7 +367,9 @@ def template_match(parsed_templates: List, tokens: List[Tuple], debug: bool = Fa
             log(f"\n  → Trying template {t_idx}:")
             log(f"    Pattern: {tmpl}")
             
-            valid, captures = single_template_match(sent, tmpl, debug)
+            valid, captures = single_template_match(
+                sent, tmpl, parsed_templates, template_groups, debug
+            )
             if valid:
                 # Add template reference
                 captures.append((TEMPLATE_REF, t_idx))
@@ -266,6 +379,49 @@ def template_match(parsed_templates: List, tokens: List[Tuple], debug: bool = Fa
                 break
             else:
                 log(f"  ✖✖✖ Template {t_idx} did not match")
+    
+    return matched
+
+def template_match(parsed_templates: List, template_groups: dict, tokens: List[Tuple], 
+                   debug: bool = False) -> List:
+    """
+    Match tokens against all registered templates.
+    
+    Args:
+        parsed_templates: List of template patterns
+        template_groups: Dict mapping template index to set of group identifiers
+        tokens: List of (type, value) token tuples to match
+        debug: Enable debug logging
+        
+    Returns:
+        List of matched template results
+    """
+    log = print if debug else lambda *a: None
+    
+    # Match against all templates
+    #filtered_templates = list(enumerate(parsed_templates))
+    
+    filtered_templates = _filter_templates_by_groups(
+        parsed_templates, 
+        template_groups, 
+        set(["main"])
+    )
+
+    log(f"\n{'#'*60}")
+    log(f"TEMPLATE MATCHING SESSION")
+    log(f"{'#'*60}")
+    log(f"Input tokens: {tokens}")
+    log(f"Available templates: {len(parsed_templates)}")
+    log(f"Template groups: {template_groups}")
+    log(f"{'#'*60}\n")
+    
+    matched = template_match_filtered(
+        parsed_templates, 
+        template_groups,
+        tokens, 
+        filtered_templates,
+        debug
+    )
     
     log(f"\n{'#'*60}")
     log(f"MATCHING COMPLETE")

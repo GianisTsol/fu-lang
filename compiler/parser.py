@@ -1,16 +1,4 @@
-"""Token parser and lexer for the custom language.
-
-Token Format:
-    Tokens are tuples of (token_type, value):
-    - (TOKEN_TEXT, "text")           : Regular text
-    - (TOKEN_SEPARATOR, ";")         : Statement separator
-    - (TOKEN_STAR, "content")        : Star-prefixed content (wildcard, can be empty)
-    - (TOKEN_DOLLAR, "content")      : Dollar-prefixed content (wildcard, can be empty)
-    - (TOKEN_RAW, "content")         : Tilde-prefixed raw content (no matching)
-    - (TOKEN_STRING, "content")      : String literal
-    - (TOKEN_TEMPLATE, template_id)  : Template reference (#N or #*)
-    - (BOUNDING_TYPE, [tokens])      : Bounded block like (), [], {}
-"""
+"""Token parser and lexer for the custom language."""
 
 from config import BOUNDINGS, ParseError, get_special_chars
 from reader import Reader
@@ -168,8 +156,6 @@ def handle_special_character(char, fileio):
     """
     if char == ";":
         return (TOKEN_SEPARATOR, ";")
-    elif char == ",":
-        return (TOKEN_SEPARATOR, ",")
     elif char == ".":
         return (TOKEN_TEXT, ".")
     elif char == ":":

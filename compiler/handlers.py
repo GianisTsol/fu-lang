@@ -4,6 +4,7 @@ from config import ARGS_REGISTERS
 from ir_system import IRSystem
 from reader import Reader
 from parser import parse as parse_tokens
+from template_matcher import template_match
 
 from config import IMI
 
@@ -173,7 +174,7 @@ def op_asm_handler(op, asm, context: IRSystem.BlockContext):
     lines = block_handler(asm)
 
     if loc not in OP_ASM_MAP:
-        OP_ASM_MAP[loc] = {op: {}}
+        OP_ASM_MAP[loc] = {operator: {}}
     OP_ASM_MAP[loc][operator] = {"asm": lines, "args": args, "result": result}
 
     return []
@@ -211,7 +212,9 @@ def op_handler(left, op, right, context: IRSystem.BlockContext):
     result_reg = None
     if op_data["result"]:
         result_reg = context.vreg.new_vreg()
-        context.update_variable_register("_ret_op_temp", result_reg)
+    
+    print("AAA")
+    context.pipe.append(result_reg)
 
     final = []
 
@@ -239,14 +242,8 @@ def multi_op_handler(left, op, right, context: IRSystem.BlockContext):
     namespace = context.get_global_prefix()
 
     r = block_handler(right, context=context)
-    r_reg = context.get_variable_register("_ret_op_temp")
-    context.update_variable_register("_ret_op_temp1", r_reg)
-    l = block_handler(left, context=context)
 
-    print(r)
-    print(l)
-
-    final = op_handler("_ret_op_temp1", op, "_ret_op_temp1", context=context)
+    final = op_handler(left, op, context.pipe.pop(), context=context)
     r.extend(final)
 
 
@@ -294,30 +291,211 @@ def while_handler(cond, block, context):
     r = block_handler(cond, context=context)
     print(r)
 
+
+def expr_handler(expr, context):
+    print("EXPR:", expr)
+    exit()
+
+    try:
+        val = int(expr)
+        context.pipe.append(val)
+    except ValueError:
+        pass
+
+
+
+# Token type constants
+VARIABLE = "$"
+WILDCARD = "*"
+KEYWORD = "t"
+SYMBOL = "b"
+WORD = "t"
+PUNCTUATION = "p"
+BLOCK_START = "{"
+BLOCK_END = "}"
+PAREN_START = "("
+PAREN_END = ")"
+BRACKET_START = "["
+BRACKET_END = "]"
+
+# Format: (pattern, groups, handler)
+TEMPLATES = [
+    # class $name { *block }
+    (
+        [
+            (WORD, "class"),
+            (VARIABLE, "name"),
+            (BLOCK_START + BLOCK_END, [(WILDCARD, "block")])
+        ],
+        ["main"],
+        class_handler
+    ),
+    
+    # func $name( *args ) { *block }
+    (
+        [
+            (WORD, "func"),
+            (VARIABLE, "name"),
+            (PAREN_START + PAREN_END, [(WILDCARD, ("args", ["decs"]))]),
+            (BLOCK_START + BLOCK_END, [(WILDCARD, ("block", ["expr", "flow", "decs"]))])
+        ],
+        ["main"],
+        func_handler
+    ),
+    
+    # return $value
+    (
+        [
+            (WORD, "return"),
+            (VARIABLE, "value")
+        ],
+        ["flow"],
+        return_handler
+    ),
+    
+    # if ( *cond ) { *block }
+    (
+        [
+            (WORD, "if"),
+            (PAREN_START + PAREN_END, [(WILDCARD, ("cond", ["expr"]))]),
+            (BLOCK_START + BLOCK_END, [(WILDCARD, ("block", ["expr", "flow", "decs"]))])
+        ],
+        ["flow"],
+        if_handler
+    ),
+    
+    # while ( *cond ) { *block }
+    (
+        [
+            (WORD, "while"),
+            (PAREN_START + PAREN_END, [(WILDCARD, ("cond", ["expr"]))]),
+            (BLOCK_START + BLOCK_END, [(WILDCARD, ("block", ["expr", "flow", "decs"]))])
+        ],
+        ["flow"],
+        while_handler
+    ),
+    
+    # _op_asm $op { *asm }
+    (
+        [
+            (WORD, "_op_asm"),
+            (VARIABLE, "op"),
+            (BLOCK_START + BLOCK_END, [(WILDCARD, "asm")])
+        ],
+        ["asm"],
+        op_asm_handler
+    ),
+    
+    # _asm $string
+    (
+        [
+            (WORD, "_asm"),
+            (VARIABLE, "string")
+        ],
+        ["asm"],
+        asm_handler
+    ),
+    
+    # new $name[$size]: $type
+    (
+        [
+            (WORD, "new"),
+            (VARIABLE, "name"),
+            (BRACKET_START + BRACKET_END, [(VARIABLE, "size")]),
+            (KEYWORD, ":"),
+            (VARIABLE, "type")
+        ],
+        ["decs"],
+        array_declaration_handler
+    ),
+    
+    # new $name: $type
+    (
+        [
+            (WORD, "new"),
+            (VARIABLE, "name"),
+            (KEYWORD, ":"),
+            (VARIABLE, "type")
+        ],
+        ["decs"],
+        declaration_handler
+    ),
+
+    # *left $op *right
+    (
+        [
+            (WILDCARD, ("left", ["name"])),
+            (VARIABLE, ("op", ["=", "+", "-", "=="])),
+            (WILDCARD, ("right", ["name", "expr"]))
+        ],
+        ["expr"],
+        declaration_handler
+    ),
+
+    # *name[$index]
+    (
+        [
+            (WILDCARD, ("name", ["base_name"])),
+            (BRACKET_START + BRACKET_END, [(VARIABLE, "index")]),
+        ],
+        ["name"],
+        declaration_handler
+    ),
+
+    # $parent.$child
+    (
+        [
+            (VARIABLE, "parent"),
+            (SYMBOL, "."),
+            (VARIABLE, "child"),
+        ],
+        ["base_name, name"],
+        declaration_handler
+    ),
+
+    # $name
+    (
+        [
+            (VARIABLE, "name")
+        ],
+        ["base_name, name"],
+        declaration_handler
+    ),
+
+]
+
+
 TEMPLATES_HANDLERS = [
-("class $name { *block }", class_handler),
-("call $name.$child( *args )", child_call_handler),
 
-("func $name( *args ) { *block }", func_handler),
-("return $value", return_handler),
+("class $name { *block }", ["main"],class_handler),
 
-("call $name( *args )", call_handler),
+("func $name( *args ) { *block }", ["main"], func_handler),
+("return $value", ["main"], return_handler),
 
-("if ( *cond ) { *block }", if_handler),
-("while ( *cond ) { *block }", while_handler),
+("if ( *cond ) { *block }", ["main"], if_handler),
+("while ( *cond ) { *block }", ["main"], while_handler),
 
 
-("_op_asm $op { *asm }", op_asm_handler),
+("_op_asm $op { *asm }", ["main"], op_asm_handler),
 
-("_asm $string", asm_handler),
+("_asm $string", ["main"], asm_handler),
 
-("$name[$size]: $type", array_declaration_handler),
-("$name: $type", declaration_handler),
-("new $name: $type", declaration_handler),
+("new $name[$size]: $type", ["main"], array_declaration_handler),
+("new $name: $type", ["main"], declaration_handler),
 
-("( *left ) $op ( *right )", multi_op_handler),
+#("$left $op *right", multi_op_handler),
 
-("$left $op $right", op_handler),
+("$expr", expr_handler),
+
+("(**expr)", expr_handler)
+]
+
+T = [
+("$name.$child( *args )", child_call_handler),
+
+("$name( *args )", call_handler),
+
+
 
 ("$name", ref_handler),
 ("$name[ $index ]", ref_index_handler),
@@ -326,27 +504,26 @@ TEMPLATES_HANDLERS = [
 ]
 
 
-def get_parsed_templates():
-    """Register a new template with its handler function."""
+def get_parsed_templates(templates):
     parsed_templates = []
     
-    for template_text, handler in TEMPLATES_HANDLERS:
-        reader = Reader()
-        reader.load_text(template_text)
-        parsed = parse_tokens(reader)
-        parsed_templates.append(parsed)
+    for template_text, groups, handler in templates:
+        parsed_templates.append(template_text)
     return parsed_templates
 
-def get_template_handlers():
-    """Register a new template with its handler function."""
+def get_template_handlers(templates):
     parsed_templates = []
     
-    for template_text, handler in TEMPLATES_HANDLERS:
+    for template_text, groups, handler in templates:
         parsed_templates.append(handler)
     return parsed_templates
 
-template_handlers = get_template_handlers()
-parsed_templates = get_parsed_templates()
+def get_template_groups(templates):
+    parsed_templates = {}
+    
+    for idx, (template_text, groups, handler) in enumerate(templates):
+        parsed_templates[idx] = groups
+    return parsed_templates
 
 
 def unknown_func(*args):
@@ -354,6 +531,8 @@ def unknown_func(*args):
 
 @staticmethod
 def block_handler(block, context=None):
+    template_handlers = get_template_handlers(TEMPLATES)
+
     """Handle code blocks."""
     if context is None:
         context = IRSystem.BlockContext()
@@ -380,3 +559,9 @@ def block_handler(block, context=None):
             traceback.print_exc()
     return instructions
 
+def matching_handler(tokens):
+    template_handlers = get_template_handlers(TEMPLATES)
+    parsed_templates = get_parsed_templates(TEMPLATES)
+    template_groups = get_template_groups(TEMPLATES)
+
+    return template_match(parsed_templates, template_groups, tokens, debug=True)

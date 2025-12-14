@@ -2,6 +2,5 @@
 env/
 legacy/
 test.py
-test.fu
-old.fu
+*.fu
 __pycache__

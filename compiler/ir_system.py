@@ -48,9 +48,7 @@ class IRSystem:
             self.types = {}
             
             self.memory_start_reg = self.vreg.new_vreg()
-            print("="*30)
-            print(f"Memory start ptr: {self.memory_start_reg}")
-            print("="*30)
+
 
             self.memory_used = 0
 

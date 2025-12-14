@@ -2,12 +2,12 @@
 
 from reader import Reader
 from parser import parse
-from template_matcher import template_match, parsed_templates
+from template_matcher import template_match
 from ir_system import IRSystem
 from ir_instructions import Instruction
 from ir_optimizer import IROptimizer
 from ir_analyzer import print_ir_code
-from handlers import block_handler
+from handlers import block_handler, matching_handler
 
 def compile_file(filename, debug=False, optimize=True):
     """Compile a source file to IR code."""
@@ -31,8 +31,9 @@ def compile_file(filename, debug=False, optimize=True):
             print(f"parsed templates: {parsed_templates}")
             print("="*70)
         
-        matched = template_match(parsed_templates, parsed_tokens, debug=debug)
-        
+        matched = matching_handler(parsed_tokens)
+
+
         if debug:
             print("\n" + "="*70)
             print("MATCHED RESULT:")

@@ -41,4 +41,3 @@ def get_special_chars():
     return ([b[0] for b in BOUNDINGS] + 
             [b[1] for b in BOUNDINGS] + 
             [" ", ";", ",", '"', "*", "$", "#", ".", ":"])
-
