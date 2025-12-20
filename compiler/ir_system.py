@@ -15,6 +15,8 @@ class IRSystem:
             self.register_count = ARGS_REGISTERS + 1
             self.freed = []
 
+            self.register_types = {}
+
         def new_vreg(self):
             """Allocate a new virtual register."""
             if self.freed:
@@ -26,32 +28,61 @@ class IRSystem:
             """Mark register as freed."""
             self.freed.append(reg)
 
+        def get_register_type(self, reg):
+            if not reg:
+                print("Warning: Why are you trying to get the type of None?")
+                return
+            try:
+                int(reg)
+                print(f"Warning: Why are you giving the VRM int again? {reg}")
+            except ValueError:
+                pass
+
+            if not (type(reg) == str and len(reg) > 1 and reg.startswith("v")):
+                print(f"Warning: doesnt look much like a register does it? {reg}")
+                return
+            if reg in self.register_types:
+                return self.register_types[reg]
+            print(f"Warning: Register type not found: {reg}")
+
+        def set_register_type(self, register, vtype):
+            self.register_types[register] = vtype
+
     class MetaPipe:
         def __init__(self):
             self.pipes = {}
         
         def push(self, data, pipe="default"):
-            print(f"{data} pushed to pipe.")
+            #print(f"{data} pushed to pipe.")
             if pipe not in self.pipes:
                 self.pipes[pipe] = []
 
             self.pipes[pipe].append(data)
-            print(f"Pipe: {self.pipes[pipe]}")
 
         
         def pop(self, pipe="default"):
+            if self.peek(pipe=pipe):
+                return self.pipes[pipe].pop()
+        
+        def peek(self, pipe="default"):
             if pipe not in self.pipes:
-                print(f"Pipe not found: {pipe}")
+                print(f"Warning: This is not a pipe: {pipe}")
                 return None
             if len(self.pipes[pipe]) == 0:
                 print("Nothing in pipe! check your logic!")
-                return None
-            return self.pipes[pipe].pop()
-        
+                return None    
+            return self.pipes[pipe][-1]
 
+        def pop_all(self, pipe="default"):
+            if pipe not in self.pipes:
+                return
+            data = self.pipes[pipe]
+            self.pipes[pipe] = []
+            return data
+        
     class TypeManager:
         def __init__(self):
-            self.typemap = {}
+            self.typemap = {"void": {}}
 
         def add_type(self, name):
             if name in self.typemap:
@@ -71,12 +102,15 @@ class IRSystem:
             self.vreg = IRSystem.VirtualRegisterManager()
 
             self.variables = {}
+    
             self.types = IRSystem.TypeManager()
             
             self.memory_start_reg = self.vreg.new_vreg()
 
 
             self.memory_used = 0
+
+            self.static_memory = []
 
             self.pipe = IRSystem.MetaPipe()
             self.parent = parent
@@ -87,37 +121,70 @@ class IRSystem:
             return m
 
         def get_type(self, value):
+            if not value:
+                print("Warning: Trying to get type of none")
+                return
             n = self.get_variable_type(value)
             if n : return n
             try:
                 int(value)
-                return "int"
+                return "usize"
             except ValueError:
                 pass
-            if value.startswith("v"):
-                g = value[1:]
-                return "reg"
-            return None
+            
+            try:
+                num = int(value[1:])
+            except ValueError:
+                print(f"Warning: how can this even have a type? {type(value)}({value})")
+                return
+
+            if value.startswith("s"):
+                add = self.get_static(num)
+                return
+            elif value.startswith("v"):
+                reg_type = self.vreg.get_register_type(value)
+                if reg_type: 
+                    return reg_type
+                else:
+                    return
+            print(f"No type found for {type(value)}({value})")
 
 
         def get_variable_register(self, var_name):
             """Get register for variable."""
             if var_name in self.variables:
-                return self.variables[var_name]["register"]
+                if "register" in self.variables[var_name]:
+                    return self.variables[var_name]["register"]
             if self.parent:
                 return self.parent.get_variable_register(var_name)
             return None
+
+        def add_static(self, static):
+            self.static_memory.append(static)
+            return len(self.static_memory) - 1
+
+        def get_static(self, idx):
+            if idx < len(self.static_memory):
+                return self.static_memory[idx]
 
         def update_variable_register(self, var_name, reg):
             """Update variable register."""
             try:
                 reg_num = int(reg)
-                reg = f"v{reg_num}"
+                #TODO: somehow categorize imm and reg for assembly?
             except (ValueError, TypeError):
                 pass
             if var_name not in self.variables:
                 self.variables[var_name] = {}
+            else:
+                vtype = self.get_type(var_name)
+                print(f"Moving {var_name} to {reg}")
+                if not vtype:
+                    print(f"Warning: Updating variable register before setting type '{var_name}'")
+                self.vreg.set_register_type(reg, vtype)
+            print(f"TYPE: {self.get_type(reg)}")
             self.variables[var_name]["register"] = reg
+
         
         def get_variable_type(self, var_name):
             """Get type for variable."""
@@ -136,6 +203,10 @@ class IRSystem:
                 print(f"Error: Invalid type: {vtype}")
                 return
             self.variables[var_name]["type"] = vtype
+            if "register" in self.variables[var_name]:
+                reg = self.variables[var_name]["register"]
+                self.vreg.set_register_type(vtype)
+
 
         def create_child_context(self, name):
             """Create child context."""

@@ -40,4 +40,4 @@ def get_special_chars():
     """Get list of special characters used in parsing."""
     return ([b[0] for b in BOUNDINGS] + 
             [b[1] for b in BOUNDINGS] + 
-            [" ", ";", ",", '"', "*", "$", "#", ".", ":"])
+            [" ", ";", ",", '"', "*", "$", "#", ".", ":", "&"])

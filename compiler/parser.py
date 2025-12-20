@@ -156,11 +156,15 @@ def handle_special_character(char, fileio):
     """
     if char == ";":
         return (TOKEN_SEPARATOR, ";")
+    if char == ",":
+        return (TOKEN_SEPARATOR, ".")
     elif char == ".":
         return (TOKEN_TEXT, ".")
     elif char == ":":
         return (TOKEN_TEXT, ":")
-    
+    elif char == "&":
+        return (TOKEN_TEXT, "&")
+
     return None
 
 
