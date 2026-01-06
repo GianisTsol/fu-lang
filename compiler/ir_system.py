@@ -8,6 +8,50 @@ class IRSystem:
     
     ib = InstructionBuilder()
     
+    # =========================
+    # Types
+    # =========================
+    class Type:
+        def __init__(self, name, size, signed):
+            self.name = name
+            self.size = size
+            self.signed = signed
+
+        def __repr__(self):
+            return self.name
+
+    void = Type("void", 0, False)
+    usize = Type("usize", 8, False)
+    isize = Type("isize", 8, True)
+    u8    = Type("u8",    1, False)
+    ptr   = Type("ptr",   8, False)
+
+    # =========================
+    # IR Values
+    # =========================
+        
+    class TypeManager:
+        def __init__(self):
+            self.typemap = {"void": {}}
+
+        def add_type(self, name):
+            if name in self.typemap:
+                print(f"Error: Type already registered: {name}")
+                return
+            self.typemap[name] = {}
+        
+        def get_types(self):
+            return self.typemap.keys()
+
+    class Value:
+        def __init__(self, typ, name):
+            self.type = typ
+            self.name = name
+        def __repr__(self):
+            return f"{self.name}:{self.type}"
+
+
+
     class VirtualRegisterManager:
         """Manages virtual register allocation."""
         
@@ -79,20 +123,6 @@ class IRSystem:
             data = self.pipes[pipe]
             self.pipes[pipe] = []
             return data
-        
-    class TypeManager:
-        def __init__(self):
-            self.typemap = {"void": {}}
-
-        def add_type(self, name):
-            if name in self.typemap:
-                print(f"Error: Type already registered: {name}")
-                return
-            self.typemap[name] = {}
-        
-        def get_types(self):
-            return self.typemap.keys()
-                    
 
     class BlockContext:
         """Context for tracking variables and registers."""
@@ -105,15 +135,20 @@ class IRSystem:
     
             self.types = IRSystem.TypeManager()
             
-            self.memory_start_reg = self.vreg.new_vreg()
-
-
-            self.memory_used = 0
+            #self.stack_ptr = IRSystem.Address("vSTACK_PTR", 0)
+            self.stack_offset = 0
 
             self.static_memory = []
 
             self.pipe = IRSystem.MetaPipe()
             self.parent = parent
+
+            self.code = []
+
+        def emit(self, code):
+            if isinstance(code, list):
+                self.code.extend(code)
+            self.code.append(code)
 
         def get_memory(self, size):
             m = self.memory_used
@@ -139,8 +174,8 @@ class IRSystem:
                 return
 
             if value.startswith("s"):
-                add = self.get_static(num)
-                return
+                add = self.get_static(value)
+                return self.get_type(add)
             elif value.startswith("v"):
                 reg_type = self.vreg.get_register_type(value)
                 if reg_type: 
@@ -161,9 +196,10 @@ class IRSystem:
 
         def add_static(self, static):
             self.static_memory.append(static)
-            return len(self.static_memory) - 1
+            return f"s{len(self.static_memory) - 1}"
 
-        def get_static(self, idx):
+        def get_static(self, static):
+            idx = int(static[1:])
             if idx < len(self.static_memory):
                 return self.static_memory[idx]
 
@@ -178,11 +214,9 @@ class IRSystem:
                 self.variables[var_name] = {}
             else:
                 vtype = self.get_type(var_name)
-                print(f"Moving {var_name} to {reg}")
                 if not vtype:
                     print(f"Warning: Updating variable register before setting type '{var_name}'")
                 self.vreg.set_register_type(reg, vtype)
-            print(f"TYPE: {self.get_type(reg)}")
             self.variables[var_name]["register"] = reg
 
         

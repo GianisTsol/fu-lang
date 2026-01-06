@@ -4,3 +4,4 @@ legacy/
 test.py
 *.fu
 __pycache__
+.continue

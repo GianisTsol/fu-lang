@@ -284,7 +284,11 @@ def single_template_match(tokens: List[Tuple], template: List[Tuple],
             if len(act_type) != len(exp_type):
                 log(f"  ✖ FAILED: Block type length mismatch")
                 return False, []
-            
+
+            if act_type != exp_type:
+                log(f"  ✖ FAILED: Block mismatch")
+                return False, []
+
             log(f"    Recursing into block content...")
             block_valid, block_captures = single_template_match(
                 act_val, exp_val, parsed_templates, template_groups, debug

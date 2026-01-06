@@ -7,11 +7,11 @@ from ir_system import IRSystem
 from ir_instructions import Instruction
 from ir_optimizer import IROptimizer
 from ir_analyzer import print_ir_code
-from handlers import block_handler, matching_handler
+from handlers import generator, matching_handler
 
 def compile_file(filename, debug=False, optimize=True):
     """Compile a source file to IR code."""
-    try:
+    try:        
         # Parse
         r = Reader()
         r.load_file(filename)
@@ -42,11 +42,11 @@ def compile_file(filename, debug=False, optimize=True):
                 print(f"{i}: {match}")
         
         # Generate IR
-        ir_code = block_handler(matched)
+        ir_code = generator(matched)
         
         # Optimize if requested
         if optimize:
-            instructions = [Instruction.from_tuple(inst) for inst in ir_code]
+            instructions = [Instruction.from_tuple(inst) if type(inst) == tuple else inst for inst in ir_code]
             optimized = IROptimizer.optimize(instructions)
             print_ir_code(optimized)
             return optimized

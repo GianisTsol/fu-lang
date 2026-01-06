@@ -70,7 +70,7 @@ def print_ir_code(instructions: List[Union[Instruction, tuple]]):
     # Print instructions
     for i, inst in enumerate(inst_list):
         if inst.opcode == IMI.LABEL:
-            print(f"\n{inst.operands[0]}:")
+            print(f"{inst.operands[0]}:")
         else:
             print(f"  {i:3d}: {inst}")
     

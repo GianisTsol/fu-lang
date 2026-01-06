@@ -10,7 +10,6 @@ class Instruction:
     """Represents a single IR instruction with validation."""
     opcode: IMI
     operands: Tuple[Any, ...]
-    
     def __post_init__(self):
         """Validate instruction format."""
         if not isinstance(self.opcode, IMI):
