@@ -1,267 +1,468 @@
-"""Token parser and lexer for the custom language."""
+from ast_definitions import *
+from tokenizer import Token, Tokenizer, FileStream
 
-from config import BOUNDINGS, ParseError, get_special_chars
-from reader import Reader
-
-
-# Token type constants
-TOKEN_TEXT = "t"
-TOKEN_SEPARATOR = "b"
-TOKEN_STAR = "*"
-TOKEN_DOLLAR = "$"
-TOKEN_RAW = "~"
-TOKEN_STRING = "string"
-TOKEN_TEMPLATE = "#"
-
-# Special character handlers
-SPECIAL_HANDLERS = {
-    "*": TOKEN_STAR,
-    "$": TOKEN_DOLLAR,
-    "~": TOKEN_RAW,
-}
-
-
-def get_bounded_block_end(fileio, bounding_chars):
-    """Find the end of a bounded block (e.g., matching parentheses).
+class Parser:
+    def __init__(self, tokens):
+        self.tokens = tokens
+        self.errors = []
+        self.idx = -1
+        self.stack = []  # (idx, errors)
+        self.barriers = []
+        self.token = None
+        self.furthest_error = None  # Track deepest parse failure
     
-    Args:
-        fileio: Reader object for file I/O
-        bounding_chars: Tuple of (opening, closing) characters
-        
-    Returns:
-        int: Number of characters to the end of the block
-        
-    Raises:
-        ParseError: If block is unclosed or malformed
-    """
-    char = fileio.read()
-    if char != bounding_chars[0]:
-        raise ParseError(f"Expected '{bounding_chars[0]}' at position {fileio.pos()}")
-    
-    depth = 1
-    chars_read = 0
-    
-    while depth > 0:
-        char = fileio.read()
-        chars_read += 1
-        
-        if not char:
-            raise ParseError("Unexpected EOF: unclosed bounded block")
-        
-        if char == bounding_chars[1]:
-            depth -= 1
-        elif char == bounding_chars[0]:
-            depth += 1
-    
-    fileio.back(chars_read)
-    return chars_read
+    def push(self):
+        err_num = len(self.errors) 
+        self.stack.append((self.idx, err_num))
 
+    def pop(self):
+        self.idx, err_num = self.stack.pop()
+        self.errors = self.errors[0:err_num]
 
-def remove_spaces(text):
-    """Remove leading spaces from text."""
-    return text.lstrip()
+    def barrier(self):
+        self.barriers.append(self.idx)
 
+    def available(self, ignore_barriers=False):
+        if not ignore_barriers and self.idx + 1 in self.barriers:
+            return False
+        return self.idx < len(self.tokens) - 1
 
-def parse_string_literal(fileio):
-    """Parse a string literal with escape sequences.
-    
-    Args:
-        fileio: Reader object positioned after opening quote
+    def log(self, error):
+        """Log error with position tracking"""
+        tok = self.token if self.token else (self.tokens[-1] if self.tokens else None)
         
-    Returns:
-        str: The parsed string content
-        
-    Raises:
-        ParseError: If string is unclosed
-    """
-    string_buffer = ""
-    char = fileio.read()
-    
-    while char and char != '"':
-        if char == '\\':
-            next_char = fileio.read()
-            escape_sequences = {
-                'n': '\n',
-                't': '\t',
-                '\\': '\\',
-                '"': '"'
+        if tok:
+            error_info = {
+                'message': error,
+                'token': tok,
+                'line': tok.line,
+                'col': tok.col,
+                'pos': tok.pos
             }
-            string_buffer += escape_sequences.get(next_char, next_char)
-            char = fileio.read()
         else:
-            string_buffer += char
-            char = fileio.read()
-    
-    if char != '"':
-        raise ParseError("Unexpected EOF: unclosed string literal")
-    
-    return string_buffer
-
-
-def parse_template_reference(fileio):
-    """Parse a template reference (#N or #*).
-    
-    Args:
-        fileio: Reader object positioned after '#'
+            error_info = {
+                'message': error,
+                'token': None,
+                'line': 0,
+                'col': 0,
+                'pos': len(self.tokens)
+            }
         
-    Returns:
-        tuple: (TOKEN_TEMPLATE, template_id) where id is int or "*"
+        self.errors.append(error_info)
         
-    Raises:
-        ParseError: If template reference is invalid
-    """
-    reference = fileio.read(2)
-    
-    if reference and len(reference) >= 1 and reference[0] == "*":
-        return (TOKEN_TEMPLATE, "*")
-    
-    try:
-        template_id = int(reference)
-        return (TOKEN_TEMPLATE, template_id)
-    except ValueError:
-        raise ParseError(f"Invalid template id '#{reference}'")
+        # Track furthest error for better diagnostics
+        if not self.furthest_error or error_info['pos'] > self.furthest_error['pos']:
+            self.furthest_error = error_info
 
+    def reset(self):
+        self.errors = []
+        self.furthest_error = None
 
-def parse_bounded_block(fileio, bounding_chars):
-    """Parse a bounded block (parentheses, brackets, braces).
-    
-    Args:
-        fileio: Reader object positioned before opening bounding char
-        bounding_chars: Tuple of (opening, closing) characters
+    def advance(self):
+        self.idx += 1
+        if self.idx >= len(self.tokens):
+            return False
+        self.token = self.tokens[self.idx]
+        return True
+
+    def back(self, n=1):
+        self.idx -= n
+        if self.idx >= 0:
+            self.token = self.tokens[self.idx]
+
+    def collect(self):
+        if self.advance():
+            return self.token
+        return None
+
+    def expect(self, token_value):
+        """Expect a specific token value"""
+        if self.available(ignore_barriers=True):
+            t = self.collect()
+            if t and token_value == t.value:
+                return t
+            self.log(f"Expected '{token_value}' but got '{t.value if t else 'EOF'}'")
+            self.back()
+            return None
         
-    Returns:
-        tuple: (bounding_type, parsed_tokens) where bounding_type is like "()"
-    """
-    block_end = get_bounded_block_end(fileio, bounding_chars)
-    block_content = fileio.read(block_end - 1)
-    block_content = remove_spaces(block_content)
-    
-    reader = Reader()
-    reader.load_text(block_content)
-    parsed_tokens = parse(reader)
-    
-    bounding_type = f"{bounding_chars[0]}{bounding_chars[1]}"
-    return (bounding_type, parsed_tokens)
+        self.log(f"Expected '{token_value}' but got EOF")
+        return None
+
+    def skip(self, token_value):
+        """Try to skip a token, return it if found"""
+        if self.available():
+            t = self.collect()
+            if t and t.value == token_value:
+                return t
+            self.back()
+        return None
 
 
-def handle_special_character(char, fileio):
-    """Handle special single characters that become tokens.
-    
-    Args:
-        char: The special character
-        fileio: Reader object for reading additional chars if needed
+class SyntaxRule:
+    """Base class - returns (success, ast_node)"""
+    def check(self, parser):
+        return False, None
+
+
+# Token constants
+T_FUNC = "func"
+T_PAREN_START = "("
+T_PAREN_END = ")"
+T_BRACE_START = "{"
+T_BRACE_END = "}"
+T_COMMA = ","
+
+
+class Block(SyntaxRule):
+    def __init__(self, contents_rule, start_t=T_PAREN_START, end_t=T_PAREN_END, node_class=None):
+        self.contents_rule = contents_rule
+        self.start_t = start_t
+        self.end_t = end_t
+        self.node_class = node_class
+
+    def check(self, parser):
+        start_tok = parser.expect(self.start_t)
+        if not start_tok:
+            return False, None
+
+        # Save position to find matching bracket
+        parser.push()
+        depth = 1
+        while parser.available():
+            c = parser.collect()
+            if c and c.value == self.start_t:
+                depth += 1
+            elif c and c.value == self.end_t:
+                depth -= 1
+            if depth == 0:
+                break
         
-    Returns:
-        tuple: (token_type, value) or None if char doesn't create a complete token
-    """
-    if char == ";":
-        return (TOKEN_SEPARATOR, ";")
-    if char == ",":
-        return (TOKEN_SEPARATOR, ".")
-    elif char == ".":
-        return (TOKEN_TEXT, ".")
-    elif char == ":":
-        return (TOKEN_TEXT, ":")
-    elif char == "&":
-        return (TOKEN_TEXT, "&")
+        parser.barrier()
+        parser.pop()
 
-    return None
+        # Parse contents
+        success, contents_node = self.contents_rule.check(parser)
+        if not success:
+            return False, None
 
+        end_tok = parser.expect(self.end_t)
+        if not end_tok:
+            return False, None
 
-def parse(fileio):
-    """Parse input text into token tree.
-    
-    Args:
-        fileio: Reader object containing the text to parse
+        # Create AST node if class provided
+        if self.node_class:
+            node = self.node_class(contents_node, start_tok, end_tok)
+            return True, node
         
-    Returns:
-        list: List of tokens as (type, value) tuples
-    """
-    tokens = []
-    buffer = ""
-    current_token_type = TOKEN_TEXT
-    special_chars = get_special_chars()
-    
-    char = fileio.read()
-    while char:
-        if char in special_chars:
-            # Flush any buffered text (wildcards can be empty, so flush even if buffer is empty)
-            if buffer.strip() or current_token_type in (TOKEN_STAR, TOKEN_DOLLAR, TOKEN_RAW):
-                tokens.append((current_token_type, buffer))
+        return True, contents_node
+
+    def __repr__(self):
+        return f"Block({self.start_t}...{self.end_t})"
+
+
+class Delimited(SyntaxRule):
+    def __init__(self, contents_rule, delimiter=T_COMMA, node_class=None):
+        self.contents_rule = contents_rule
+        self.delimiter = delimiter
+        self.node_class = node_class
+
+    def check(self, parser):
+        items = []
+        
+        while True:
+            success, node = self.contents_rule.check(parser)
+            if not success:
+                if len(items) == 0:
+                    return False, None
+                break
             
-            current_token_type = TOKEN_TEXT
-            buffer = ""
+            items.append(node)
+            
+            if not parser.skip(self.delimiter):
+                break
+        
+        # Wrap in list node if class provided
+        if self.node_class:
+            return True, self.node_class(items)
+        
+        return True, items
 
-            # Handle string literals
-            if char == '"':
-                string_content = parse_string_literal(fileio)
-                tokens.append((TOKEN_STRING, string_content))
-                char = fileio.read()
-                continue
+    def __repr__(self):
+        return f"Delimited({self.contents_rule})"
 
-            # Handle template references
-            if char == "#":
-                template_token = parse_template_reference(fileio)
-                tokens.append(template_token)
-                char = fileio.read()
-                continue
+
+class Chain(SyntaxRule):
+    def __init__(self, *rules, node_class=None):
+        self.rules = rules
+        self.node_class = node_class
+
+    def check(self, parser):
+        nodes = []
+        
+        for rule in self.rules:
+            success, node = rule.check(parser)
+            if not success:
+                return False, None
+            nodes.append(node)
+        
+        # If node_class provided, construct it with all child nodes
+        if self.node_class:
+            return True, self.node_class(*nodes)
+        
+        # Otherwise return list of nodes
+        return True, nodes
+
+    def __repr__(self):
+        return f"Chain({', '.join(str(r) for r in self.rules)})"
+
+
+class Keyword(SyntaxRule):
+    keywords = set()
+
+    def __init__(self, word):
+        self.word = word
+        Keyword.keywords.add(word)
+
+    def check(self, parser):
+        tok = parser.expect(self.word)
+        if tok:
+            return True, tok  # Return the token itself
+        return False, None
+    
+    def __repr__(self):
+        return f"Keyword({self.word})"
+
+
+class Symbol(SyntaxRule):
+    def __init__(self, symbol):
+        self.symbol = symbol
+
+    def check(self, parser):
+        tok = parser.expect(self.symbol)
+        if tok:
+            return True, tok
+        return False, None
+
+    def __repr__(self):
+        return f"Symbol({self.symbol})"
+
+
+class Variable(SyntaxRule):
+    def __init__(self, name=None, node_class=None):
+        self.name = name
+        self.node_class = node_class
+
+    def check(self, parser):
+        if not parser.available():
+            return False, None
+        
+        tok = parser.collect()
+        if not tok:
+            return False, None
             
-            # Handle simple special characters
-            simple_token = handle_special_character(char, fileio)
-            if simple_token:
-                tokens.append(simple_token)
-                char = fileio.read()
-                continue
+        if tok.value in Keyword.keywords or tok.value in Tokenizer.specials:
+            parser.back()
+            return False, None
+
+        # Create variable node if class provided
+        if self.node_class:
+            return True, self.node_class(tok)
+        
+        return True, tok
+
+    def __repr__(self):
+        return f"Variable({self.name})"
+
+
+class Any(SyntaxRule):
+    def __init__(self, *options, node_class=None):
+        self.options = options
+        self.node_class = node_class
+
+    def check(self, parser):
+        for option in self.options:
+            parser.push()
+            success, node = option.check(parser)
+            if success:
+                if self.node_class:
+                    return True, self.node_class(node)
+                return True, node
+            parser.pop()
+        return False, None
+
+
+class Operand(SyntaxRule):
+    def check(self, parser):
+        # Try to match operators
+        return Any(
+            Chain(Symbol("="), Symbol("=")),
+            Chain(Symbol(">"), Symbol("=")),
+            Chain(Symbol("<"), Symbol("=")),
+            Symbol(">"),
+            Symbol("<"),
+            Symbol("="),
+            Symbol("+"),
+            Symbol("-"),
+            Symbol("/"),
+            Symbol("*")
+        ).check(parser)
+
+
+class Statements(SyntaxRule):
+    statements = {}
+
+    @staticmethod
+    def check(parser):
+        statement_nodes = []
+        best_errors, progress = None, 0
+        
+        while parser.available():
+            found = False
             
-            # Handle token type modifiers
-            if char in SPECIAL_HANDLERS:
-                current_token_type = SPECIAL_HANDLERS[char]
-                char = fileio.read()
-                continue
-            
-            # Handle bounded blocks
-            bounded_token = None
-            for bounding in BOUNDINGS:
-                if char == bounding[0]:
-                    fileio.back()
-                    bounded_token = parse_bounded_block(fileio, bounding)
+            for name, rule in Statements.statements.items():
+                parser.push()
+                success, node = rule.check(parser)
+                
+                if success:
+                    found = True
+                    statement_nodes.append(node)
                     break
-            
-            if bounded_token:
-                tokens.append(bounded_token)
-                char = fileio.read()
-                continue
-        else:
-            buffer += char
+                
+                # Track furthest failure
+                if parser.idx > progress:
+                    progress = parser.idx
+                    best_errors = parser.errors.copy()
+                
+                parser.pop()
 
-        char = fileio.read()
-
-    # Flush any remaining buffered text
-    if buffer.strip():
-        tokens.append((current_token_type, buffer))
-
-    return tokens
-
-
-def split_sentences(tokens):
-    """Split tokens into sentences based on separators.
-    
-    Args:
-        tokens: List of parsed tokens
+            if found:
+                # Expect semicolon after statement
+                if not parser.expect(";"):
+                    return False, None
+            else:
+                # No statement matched - restore best error
+                if best_errors:
+                    parser.errors = best_errors
+                parser.idx = progress
+                return False, None
         
-    Returns:
-        list: List of token lists, one per sentence
-    """
-    sentences = []
-    start_index = 0
+        return True, statement_nodes
+
+    @staticmethod
+    def register(name, rule):
+        Statements.statements[name] = rule
+
+
+class Statement(SyntaxRule):
+    def __init__(self, name=None):
+        self.name = name
+
+    def check(self, parser):
+        if not self.name:
+            return False, None
+        return Statements.statements[self.name].check(parser)
+
+    def __repr__(self):
+        return f"Statement({self.name})"
+
+
+# ==============================================================
+# AST GENERATORS
+# ==============================================================
+
+def FuncBuilder(keyword, name, params, body):
+    print("PARANSNSS", params)
+    return ASTFunction(name.value, params, body)
+
+def DeclarationBuilder(name, colon, type_):
+    return ASTDeclaration(name.value, type_.value)
+
+def NewBuilder(keyword, declaration):
+    return ASTNew(declaration)
+
+def ExpressionBuilder(left, op_tok, right):
+    op = op_tok.value
+    print(left)
+    obj = None
+    if op in ["/", "*", "+", "-"]:
+        obj = ASTBinaryOp(left, op, right)
+    elif op in ["==", ">", "<", "<=", ">="]:
+        obj = ASTComparison(left, op, right)
+    elif op == "=":
+        obj = ASTAssignment(left, right)
+    return obj
+
+def SymbolBuilder(tok):
+    print("SYMBOLL: ", tok)
+    name = tok.value
+    try:
+        j = int(name)
+        return ASTStatic(j) 
+    except ValueError:
+        pass
+    return ASTReference(name)
+# ==============================================================
+# GRAMMAR REGISTAR
+# ==============================================================
+
+Statements.register("func", Chain(
+    Keyword("func"),
+    Variable("name"),
+    Block(Delimited(Statement("declaration"))),
+    Block(Statements(), start_t="{", end_t="}"),
+    node_class=FuncBuilder
+))
+
+Statements.register("declaration", Chain(
+    Variable("name"),
+    Symbol(":"),
+    Variable("type"),
+    node_class=DeclarationBuilder
+))
+
+Statements.register("new", Chain(
+    Keyword("new"),
+    Statement("declaration"),
+    node_class=NewBuilder
+))
+Statements.register("expression", Chain(
+    Variable("left", node_class=SymbolBuilder),
+    Operand(),
+    Variable("right", node_class=SymbolBuilder),
+    node_class=ExpressionBuilder
+))
+
+
+# ==============================================================
+# ERROR REPORTING
+# ==============================================================
+
+def print_errors(parser, source_lines):
+    """Pretty print errors with context"""
+    if not parser.errors:
+        return
     
-    for index, (token_type, _) in enumerate(tokens):
-        if token_type == TOKEN_SEPARATOR:
-            if start_index < index:
-                sentences.append(tokens[start_index:index])
-            start_index = index + 1
+    print("\n" + "="*60)
+    print("PARSING ERRORS")
+    print("="*60)
     
-    if start_index < len(tokens):
-        sentences.append(tokens[start_index:])
+    # Show furthest error (most likely issue)
+    if parser.furthest_error:
+        err = parser.furthest_error
+        print(f"\nMost likely issue at line {err['line']}, column {err['col']}:")
+        print(f"  {err['message']}")
+        
+        # Show source line with pointer
+        if err['line'] <= len(source_lines):
+            line = source_lines[err['line'] - 1]
+            print(f"\n  {err['line']} | {line}")
+            print(f"      {' ' * err['col']}^")
     
-    return [sentence for sentence in sentences if sentence]
+    # Show all errors
+    print(f"\nAll errors ({len(parser.errors)}):")
+    for i, err in enumerate(parser.errors[:10], 1):  # Limit to first 10
+        print(f"  {i}. Line {err['line']}, Col {err['col']}: {err['message']}")
+    
+    if len(parser.errors) > 10:
+        print(f"  ... and {len(parser.errors) - 10} more errors")
+

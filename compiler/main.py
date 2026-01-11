@@ -1,87 +1,61 @@
 """Main entry point for the compiler."""
 
-from reader import Reader
-from parser import parse
-from template_matcher import template_match
-from ir_system import IRSystem
+from parser import Parser, Statements, print_errors
+from tokenizer import Tokenizer, FileStream
+from handlers import generator
+
+
 from ir_instructions import Instruction
 from ir_optimizer import IROptimizer
 from ir_analyzer import print_ir_code
-from handlers import generator, matching_handler
 
 def compile_file(filename, debug=False, optimize=True):
     """Compile a source file to IR code."""
-    try:        
-        # Parse
-        r = Reader()
-        r.load_file(filename)
-        parsed_tokens = parse(r)
-        
-        if debug:
-            print("="*70)
-            print("PARSED TOKENS:")
-            print("="*70)
-            for i, token in enumerate(parsed_tokens):
-                print(f"{i}: {token}")
-        
-        # Match templates
-        if debug:
-            print("\n" + "="*70)
-            print("MATCHING TEMPLATES...")
-            print(f"parsed templates: {parsed_templates}")
-            print("="*70)
-        
-        matched = matching_handler(parsed_tokens)
+    # Read source file
+    with open(filename, "r") as f:
+        source = f.read()
+    source_lines = source.split('\n')
+    
+    # Tokenize
+    f = FileStream(filename)
+    tok = Tokenizer(f)
+    toks = []
+    while t := tok.next():
+        toks.append(t)
+    
+    print("Tokens:")
+    for t in toks[:20]:  # Show first 20
+        print(f"  {t}")
+    if len(toks) > 20:
+        print(f"  ... and {len(toks) - 20} more")
+    
+    # Parse
+    p = Parser(toks)
+    success, ast = Statements.check(p)
 
-
-        if debug:
-            print("\n" + "="*70)
-            print("MATCHED RESULT:")
-            print("="*70)
-            for i, match in enumerate(matched):
-                print(f"{i}: {match}")
-        
-        # Generate IR
-        ir_code = generator(matched)
-        
-        # Optimize if requested
-        if optimize:
-            instructions = [Instruction.from_tuple(inst) if type(inst) == tuple else inst for inst in ir_code]
-            optimized = IROptimizer.optimize(instructions)
-            print_ir_code(optimized)
-            return optimized
-        else:
-            print_ir_code(ir_code)
-            return ir_code
-        
-    except Exception as e:
-        print(f"\nERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
-
-def compile_text(text, debug=False, optimize=True):
-    """Compile source text to IR code."""
-    try:
-        r = Reader()
-        r.load_text(text)
-        parsed_tokens = parse(r)
-        
-        matched = template_match(parsed_templates, parsed_tokens, debug=debug)
-        ir_code = IRSystem.block_handler(matched)
-        
-        if optimize:
-            instructions = [Instruction.from_tuple(inst) for inst in ir_code]
-            return IROptimizer.optimize(instructions)
-        
+    if success:
+        print("\n" + "="*60)
+        print("✓ Successfully parsed!")
+        print("="*60)
+        print("\nAST:")
+        for node in ast:
+            print(f"  {node}")
+    else:
+        print_errors(p, source_lines)
+        exit()
+    # Generate IR
+    ir_code = generator(ast)
+    
+    # Optimize if requested
+    if optimize:
+        instructions = [Instruction.from_tuple(inst) if type(inst) == tuple else inst for inst in ir_code]
+        optimized = IROptimizer.optimize(instructions)
+        print_ir_code(optimized)
+        return optimized
+    else:
+        print_ir_code(ir_code)
         return ir_code
-        
-    except Exception as e:
-        print(f"\nERROR: {e}")
-        return None
-
-
+    
 if __name__ == "__main__":
     import sys
     
