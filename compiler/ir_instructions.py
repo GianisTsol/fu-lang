@@ -24,7 +24,7 @@ class Instruction:
         validations = {
             IMI.LOAD: (2,), IMI.STORE: (2,), IMI.MOVE: (2,),
             IMI.PUSH: (1,), IMI.POP: (1,), IMI.JUMP: (1,),
-            IMI.LABEL: (1,), IMI.ADD: (2,), IMI.SUB: (2,),
+            IMI.LABEL: (1,), IMI.ADD: (3,), IMI.SUB: (3,),
             IMI.MUL: (2,), IMI.DIV: (2,), IMI.CMP: (2,),
             IMI.JE: (1,), IMI.JNE: (1,), IMI.JGT: (1,),
             IMI.JLT: (1,), IMI.CALL: (1,), IMI.RET: (0,),
@@ -90,12 +90,12 @@ class InstructionBuilder:
         return Instruction(IMI.LABEL, (name,))
     
     @staticmethod
-    def add(dest, src):
-        return Instruction(IMI.ADD, (dest, src))
+    def add(dest, a, b):
+        return Instruction(IMI.ADD, (dest, a, b))
     
     @staticmethod
-    def sub(dest, src):
-        return Instruction(IMI.SUB, (dest, src))
+    def sub(dest, a, b):
+        return Instruction(IMI.SUB, (dest, a, b))
     
     @staticmethod
     def mul(dest, src):

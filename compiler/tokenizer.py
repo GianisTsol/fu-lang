@@ -19,7 +19,7 @@ class Token:
 
 
 class Tokenizer:
-    specials = [";", ",", ".", ":", "(", ")", "{", "}", "*", "%", "=", "+", "-", ">", "<"]
+    specials = [";", ",", ".", ":", "(", ")", "[", "]", "{", "}", "*", "%", "=", "+", "-", ">", "<"]
 
     def __init__(self, stream):
         self.stream = stream

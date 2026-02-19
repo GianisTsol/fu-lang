@@ -4,6 +4,7 @@ from parser import Parser, Statements, print_errors
 from tokenizer import Tokenizer, FileStream
 from handlers import generator
 
+from target import Amd64
 
 from ir_instructions import Instruction
 from ir_optimizer import IROptimizer
@@ -35,12 +36,13 @@ def compile_file(filename, debug=False, optimize=True):
 
     if success:
         print("\n" + "="*60)
-        print("✓ Successfully parsed!")
+        print("Successfully parsed!")
         print("="*60)
         print("\nAST:")
         for node in ast:
             print(f"  {node}")
     else:
+        print("Parsing error:")
         print_errors(p, source_lines)
         exit()
     # Generate IR
@@ -64,7 +66,9 @@ if __name__ == "__main__":
         debug = "--debug" in sys.argv
         no_opt = "--no-opt" in sys.argv
         
-        compile_file(filename, debug=debug, optimize=not no_opt)
+        ir = compile_file(filename, debug=debug, optimize=not no_opt)
+        final = Amd64()
+        final.compile(ir)
     else:
         print("Usage: python main.py <filename> [--debug] [--no-opt]")
         print("\nExample:")

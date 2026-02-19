@@ -122,6 +122,7 @@ class Block(SyntaxRule):
 
     def check(self, parser):
         start_tok = parser.expect(self.start_t)
+        print(start_tok)
         if not start_tok:
             return False, None
 
@@ -172,8 +173,8 @@ class Delimited(SyntaxRule):
         while True:
             success, node = self.contents_rule.check(parser)
             if not success:
-                if len(items) == 0:
-                    return False, None
+                # if len(items) == 0:
+                #     return False, None
                 break
             
             items.append(node)
@@ -273,7 +274,6 @@ class Variable(SyntaxRule):
     def __repr__(self):
         return f"Variable({self.name})"
 
-
 class Any(SyntaxRule):
     def __init__(self, *options, node_class=None):
         self.options = options
@@ -290,6 +290,16 @@ class Any(SyntaxRule):
             parser.pop()
         return False, None
 
+class Optional(SyntaxRule):
+    def __init__(self, option):
+        self.option = option
+    
+    def check(self, parser):
+        success, node = self.option.check(parser)
+        if success:
+            return True, node
+        else:
+            return True, None
 
 class Operand(SyntaxRule):
     def check(self, parser):
@@ -300,14 +310,29 @@ class Operand(SyntaxRule):
             Chain(Symbol("<"), Symbol("=")),
             Symbol(">"),
             Symbol("<"),
-            Symbol("="),
             Symbol("+"),
             Symbol("-"),
             Symbol("/"),
             Symbol("*")
         ).check(parser)
 
+class Name(SyntaxRule):
+    def __init__(self, name, node_class=None):
+        self.name = name
+        self.node_class = node_class
 
+    def check(self, parser):
+        success, node = Chain(
+            Variable("name"),
+            Optional(Block(Ref("idx"), start_t="[", end_t="]")),
+            node_class=NameBuilder).check(parser)
+        if success:
+            if self.node_class:
+                return True, self.node_class(node)
+            else:
+                return True, node
+        return False, None
+        
 class Statements(SyntaxRule):
     statements = {}
 
@@ -319,18 +344,21 @@ class Statements(SyntaxRule):
         while parser.available():
             found = False
             
-            for name, rule in Statements.statements.items():
+            for depth, (name, rule) in enumerate(Statements.statements.items()):
                 parser.push()
+                print(name)
                 success, node = rule.check(parser)
                 
                 if success:
                     found = True
                     statement_nodes.append(node)
+                    print(f"{name} checked out! ")
+
                     break
                 
                 # Track furthest failure
-                if parser.idx > progress:
-                    progress = parser.idx
+                if parser.idx * (len(Statements.statements) - depth) > progress:
+                    progress = parser.idx * (len(Statements.statements) - depth)
                     best_errors = parser.errors.copy()
                 
                 parser.pop()
@@ -343,6 +371,7 @@ class Statements(SyntaxRule):
                 # No statement matched - restore best error
                 if best_errors:
                     parser.errors = best_errors
+                print(f"{name} failed..")
                 parser.idx = progress
                 return False, None
         
@@ -369,19 +398,41 @@ class Statement(SyntaxRule):
 # ==============================================================
 # AST GENERATORS
 # ==============================================================
+def AsmBuilder(keyword, inst, params):
+    return ASTAsm(inst.value, params)
 
 def FuncBuilder(keyword, name, params, body):
     print("PARANSNSS", params)
     return ASTFunction(name.value, params, body)
 
-def DeclarationBuilder(name, colon, type_):
-    return ASTDeclaration(name.value, type_.value)
+def CallBuilder(name, args):
+    return ASTFuncCall(name.value, args)
+
+def ReturnBuilder(keyword, expression):
+    return ASTReturn(expression)
+
+def MacroBuilder(keyword, name, params, block):
+    return ASTMacro(name.value, params, block)
+
+def ClassBuilder(keyword, name, block):
+    return ASTClass(name.value, block)
+
+def DeclarationBuilder(name_obj, colon, type_):
+    name, size = name_obj
+    size = 1
+    return ASTDeclaration(name, type_.value, length=size)
 
 def NewBuilder(keyword, declaration):
     return ASTNew(declaration)
 
+def StaticBuilder(keyword, declaration):
+    return None
+
 def ExpressionBuilder(left, op_tok, right):
-    op = op_tok.value
+    if isinstance(op_tok, list):
+        op = "".join(t.value for t in op_tok)
+    else:
+        op = op_tok.value
     print(left)
     obj = None
     if op in ["/", "*", "+", "-"]:
@@ -392,18 +443,40 @@ def ExpressionBuilder(left, op_tok, right):
         obj = ASTAssignment(left, right)
     return obj
 
-def SymbolBuilder(tok):
-    print("SYMBOLL: ", tok)
-    name = tok.value
+def RefBuilder(name_obj):
+    print("SYMBOLL: ", name_obj)
+    assert "[" not in name_obj[0]
+    name, idx = name_obj
     try:
         j = int(name)
         return ASTStatic(j) 
     except ValueError:
         pass
-    return ASTReference(name)
+    return ASTReference(name, idx)
+
+def NameBuilder(tok, opt_size):
+    print("NAMEEE: ", tok, opt_size)
+    name = tok.value
+    size = 1
+    if opt_size:
+        size = opt_size
+    return (name, opt_size)
+
+def IfBuilder(keyword, condition, block):
+    return ASTIfStatement(condition, block)
+    
 # ==============================================================
 # GRAMMAR REGISTAR
 # ==============================================================
+
+Ref = lambda l: Name(l, node_class=RefBuilder)
+
+Statements.register("class", Chain(
+    Keyword("class"),
+    Variable("name"),
+    Block(Statements(), start_t="{", end_t="}"),
+    node_class=ClassBuilder
+))
 
 Statements.register("func", Chain(
     Keyword("func"),
@@ -413,25 +486,84 @@ Statements.register("func", Chain(
     node_class=FuncBuilder
 ))
 
-Statements.register("declaration", Chain(
+Statements.register("macro", Chain(
+    Keyword("macro"),
     Variable("name"),
+    Block(Delimited(Statement("declaration"))),
+    Block(Statements(), start_t="{", end_t="}"),
+    node_class=MacroBuilder
+))
+
+Statements.register("call", Chain(
+    Variable("target"),
+    Block(Delimited(Ref("source"))),
+    node_class=CallBuilder
+))
+
+Statements.register("return", Chain(
+    Keyword("return"),
+    Ref("ref"),
+    node_class=ReturnBuilder
+))
+
+
+Statements.register("assignment", Chain(
+    Any(Statement("new"), Statement("static"), Ref("dest")),
+    Symbol("="),
+    Statement("expression"),
+    node_class=ExpressionBuilder 
+))
+
+
+Statements.register("declaration", Chain(
+    Name("decname"),
     Symbol(":"),
     Variable("type"),
     node_class=DeclarationBuilder
 ))
+
+
+Statements.register("expression", Any(
+    Statement("operation"),
+    Statement("call"),
+    Ref("var"),
+))
+
+Statements.register("operation",
+    Chain(
+        Any(Ref("left"), Statement("call")),
+        Operand(),
+        Statement("expression"),
+        node_class=ExpressionBuilder
+        ),   
+)
 
 Statements.register("new", Chain(
     Keyword("new"),
     Statement("declaration"),
     node_class=NewBuilder
 ))
-Statements.register("expression", Chain(
-    Variable("left", node_class=SymbolBuilder),
-    Operand(),
-    Variable("right", node_class=SymbolBuilder),
-    node_class=ExpressionBuilder
+
+
+Statements.register("static", Chain(
+    Keyword("static"),
+    Statement("declaration"),
+    node_class=StaticBuilder
 ))
 
+Statements.register("if", Chain(
+    Keyword("if"),
+    Block(Statement("expression")),
+    Block(Statements(), start_t="{", end_t="}"),
+    node_class=IfBuilder
+))
+
+Statements.register("asm", Chain(
+    Keyword("asm"),
+    Variable("inst"),
+    Block(Delimited(Ref("arg"))),
+    node_class=AsmBuilder
+))
 
 # ==============================================================
 # ERROR REPORTING
@@ -460,7 +592,7 @@ def print_errors(parser, source_lines):
     
     # Show all errors
     print(f"\nAll errors ({len(parser.errors)}):")
-    for i, err in enumerate(parser.errors[:10], 1):  # Limit to first 10
+    for i, err in enumerate(parser.errors, 1):  # Limit to first 10
         print(f"  {i}. Line {err['line']}, Col {err['col']}: {err['message']}")
     
     if len(parser.errors) > 10:

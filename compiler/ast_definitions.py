@@ -1,104 +1,120 @@
-from ir_system import IRSystem
+from ir_system import IRSystem, Instruction, Type, Address, TypedOperand, Immediate
+from config import IMI, ARGS_REGISTERS
 
-class Register:
-    def __init__(self, idx):
-        self.idx = idx
+void = Type(0, False)
+usize = Type(8, False)
+isize = Type(8, True)
+u8    = Type(1, False)
+ptr   = Type(8, False)
 
-    def __repr__(self):
-        return f"V{self.idx}"
 
-class Address:
-    def __init__(self, reg, offset):
-        self.reg = reg
-        self.offset = offset
-
-    def add(self, other):
-        offset = self.offset
-        if isinstance(other, int):
-            offset += other
-        elif isinstance(other, Address):
-            if self.reg != other.reg:
-                print("Warning: Trying to add addresses with different start regissters.")
-                return None
-            offset += other.offset
-        return Address(self.reg, offset)
-
-    def __repr__(self):
-        return f"{self.reg}+{self.offset}"
-
-class Type:
-    def __init__(self, name, size, signed):
+class FuType:
+    def __init__(self, name, obj):
         self.name = name
-        self.size: int = size
-        self.signed = signed
+        self.obj = obj
 
-        self.macros = {}
-
+    def is_primitive(self):
+        if isinstance(self.obj, Type):
+            return True
+        return False
+    
+    def size(self):
+        if self.is_primitive():
+            return self.obj.size
+        else:
+            return self.obj.size()
+    
+    def reduce(self):
+        if self.is_primitive():
+            return self.obj
+        else:
+            return ptr
     def __repr__(self):
-        return f"<{self.name}>"
+        return f"vFu:<{self.name}:{self.obj}>"
 
-void = Type("void", 0, False)
-usize = Type("usize", 8, False)
-isize = Type("isize", 8, True)
-u8    = Type("u8",    1, False)
-ptr   = Type("ptr",   8, False)
 
 VTYPES = {
-    "void:": void,
-    "usize": usize,
-    "u8": u8,
+    "void:": FuType("void", void),
+    "usize": FuType("usize", usize),
+    "u8": FuType("u8", u8),
+    "isize": FuType("isize", isize),
 }
+
+class SymbolTable:
+    def __init__(self, name):
+        self.name = name
+
+        self.stack = []
+        self.table = {}
+    
+    def push(self, name):
+        self.stack.append(name)
+        self.set_nested(self.table, [*self.stack, name], {})
+    
+    def pop(self):
+        if self.stack:
+            self.stack.pop()
+        
+
+    def set_nested(self, d, keys, value):
+        for k in keys[:-1]:
+            d = d.setdefault(k, {})
+        d[keys[-1]] = value
+
+    def get_nested(self, d, keys):
+        for k in keys:
+            d = d[k]
+        return d
+
+    def add(self, name, data):
+        self.set_nested(self.table, [*self.stack, name], data)
+    
+    def get(self, name, offset=0):
+        if offset > len(self.stack):
+            return None
+        t = self.get_nested(self.table, self.stack[:(len(self.stack)-offset)])
+
+        if name in t:
+            return t[name]
+        
+        return self.get(name, offset=offset+1)
 
 class AnalyzeContext:
     def __init__(self, name):
         self.name = name
 
         self.parent = None
-        self.local = {}
+
+        self.loc = []
+        self.symbols = SymbolTable(name)
 
     def push(self, name):
-        n = AnalyzeContext(name=name)
-        n.parent = self
-        return n
+        self.symbols.push(name)
+        return self
 
     def pop(self):
-        if not self.parent:
-            print("Error: Cant pop first context.")
-            return
-        return self.parent
-
-    def consume(self, ctx):
-        self.local[ctx.name] = ctx
+        self.symbols.pop()
+        return self
 
     def add_object(self, name, obj):
-        if name in self.local:
-            print(f"Warning: trying to add existing object: {name}")
-            return False
-        self.local[name] = obj
+        #print(f"New precompile symbol: {name}")
+        self.symbols.add(name, obj)
     
     def get_object(self, name):
-        if name in self.local:
-            return self.local[name]
-        
-        if self.parent:
-            r = self.parent.get_object(name)
-            if r:
-                return r
-        #print(f"Warning: Geting unknown object: {name}")
-        return None
+        return self.symbols.get(name)
 
 class CodeGenVar:
     def __init__(self, name, vtype):
         self.name = name
         self.vtype: Type = vtype
-        self.address = None
-        self.size = 4
+        self.location = None
     
-    def update_address(self, address):
-        self.address = address
-
+    def __repr__(self):
+        return f"{self.location}:{self.size} ({self.name})"
+    
 class CodeGenContext:
-    def __init__(self, name="root"):
+    stack_ptr_reg = 7
+    def __init__(self, name="root", parent=None):
         self.vars = {}
         self.static = {}
 
@@ -108,13 +124,14 @@ class CodeGenContext:
 
         self.label_count = 0
         self.reg_count = 0
-        self.prev = None
+
+        self.prev = parent
+        if self.prev:
+            self.reg_count = self.prev.reg_count
+            self.label_count = self.prev.label_count
 
     def push(self, name="null"):
-        a = CodeGenContext(name)
-        a.name = name
-        a.reg_count = self.reg_count
-        a.prev = self
+        a = CodeGenContext(name, self)
         return a
     
     def pop(self):
@@ -122,6 +139,7 @@ class CodeGenContext:
             print("Error: Cant pop first context.")
             return
         self.prev.code.extend(self.code)
+        self.prev.label_count = self.label_count
         self.prev.reg_count = self.reg_count
         return self.prev
 
@@ -141,11 +159,13 @@ class CodeGenContext:
             return None
         print("NEW VAR", name, "W TYPE: ", vtype)
         self.vars[name] = CodeGenVar(name, vtype)
-        self.vars[name].size = vtype.size * length
+        self.vars[name].size = vtype.size() * length
 
-    def get_memory(self, size):
-        a = Address("vsp", self.stack_offset)
-        self.stack_offset += size
+    def get_memory(self, vtype):
+        a = TypedOperand(self.stack_ptr_reg, vtype.reduce())
+        self.stack_ptr_reg += 1
+        self.stack_offset += vtype.size()
+        #self.emit(IRSystem.ib.add(Register(self.stack_ptr_reg), Register(self.stack_ptr_reg), Immediate(size)))
         return a
 
     def get_size(self, name):
@@ -156,15 +176,18 @@ class CodeGenContext:
         self.label_count += 1
         return self.label_count
 
-    def new_reg(self):
+    def new_reg(self, vtype):
         self.reg_count += 1
-        return Register(self.reg_count)
+        if self.stack_ptr_reg == self.reg_count:
+            self.reg_count += 1
+        return TypedOperand(self.reg_count, vtype.reduce())
 
-    def update_variable_address(self, name, address: Address):
-        if name not in self.vars.keys():
+    def update_variable_location(self, name, location):
+        a = self.get_var(name)
+        if not a:
             print(f"Error: Variable not found: {name}")
             return None
-        self.vars[name].update_address(address)
+        a.location = location
 
 class ASTNode:
     def __init__(self):
@@ -179,13 +202,18 @@ class ASTStatic(ASTNode):
     def __init__(self, data):
         self.vtype = None
         if isinstance(data, int):
-            self.vtype = "usize"
+            self.vtype = VTYPES["usize"]
         
         self.data = data
+        self.store = None
 
-    def reduce(self, ctx: CodeGenContext):
-        if self.vtype == "usize":
-            return self.data
+    def compile(self, ctx):
+        self.store = ctx.get_memory(self.vtype)
+        self.store.lifetime = 3 #todo: define lifetypes better
+        self.store.data = self.data
+
+    def reduce(self):
+        return self.store
     
     def __repr__(self):
         return f"static {self.data}: {self.vtype}"
@@ -194,24 +222,29 @@ class ASTReference:
     def __init__(self, name, index=0):
         self.name = name
         self.vtype: Type = None
-        self.address: Address = None
+        self.location = None
         self.index: int = index
 
     def analyze(self, ctx: AnalyzeContext):
-        obj = ctx.get_object(self.name)
-        if not obj:
-            print(f"Error: Unknown object {self.name}")
-        self.vtype = obj["type"]
+        decl = ctx.get_object(self.name)
+        if not decl:
+            print(f"Error: Unknown object ({self.name})[{self.index}] {decl}")
+            exit(1)
+        self.vtype = decl["obj"].vtype
     
     def compile(self, ctx: CodeGenContext):
         var: CodeGenVar = ctx.get_var(self.name)
-        self.address = var.address.add(self.index * var.vtype.size)
+        if self.index > 0:
+            self.location = var.location.add(self.index * self.vtype.size)
+        else:
+            self.location = var.location
 
-    def reduce(self, ctx: CodeGenContext):
-        return self.address
+    def reduce(self):
+        return self.location
+        #return TypedOperand(self.location, self.vtype.reduce())
 
     def __repr__(self):
-        return f"ref {self.name}[{self.index}]: {self.vtype} ({self.address})"
+        return f"ref {self.name}[{self.index}]: {self.vtype} ({self.location})"
 
     
 class ASTClass(ASTNode):
@@ -219,11 +252,16 @@ class ASTClass(ASTNode):
         self.name = name
         self.statements = statements
 
+        self.size = 0
+
 
     def analyze(self, ctx: AnalyzeContext):
         ctx = ctx.push(self.name)
         for statement in self.statements:
             statement.analyze(ctx)
+
+            if isinstance(statement, ASTDeclaration):
+                self.size += statement.size
         ctx = ctx.pop()
 
     def compile(self, context: CodeGenContext):
@@ -238,7 +276,7 @@ class ASTClass(ASTNode):
 
     def __str__(self):
         inner = ", ".join(str(s) for s in self.statements)
-        return f"Class([{inner}])"
+        return f"Class {self.name} ([{inner}])"
     
 class ASTReturn:
     def __init__(self, ref: ASTReference):
@@ -248,11 +286,15 @@ class ASTReturn:
     def analyze(self, ctx):
         self.ref.analyze(ctx)
         self.vtype = self.ref.vtype
+    
+    def compile(self, ctx):
+        self.ref.compile(ctx)
+        ctx.emit(IRSystem.ib.move(TypedOperand(0, self.vtype.reduce()), self.ref.reduce()))
 
 class ASTFunction(ASTNode):
     def __init__(self, name, args, statements):
         self.name = name
-        self.args = args #list[ASTDeclaration]
+        self.args: list[ASTDeclaration] = args
         self.statements = statements
         self.vtype = None
     
@@ -270,7 +312,7 @@ class ASTFunction(ASTNode):
             print(f"Analyzed: {statement}")
 
             if isinstance(statement, ASTReturn):
-                return_types.append(statement.type)
+                return_types.append(statement.vtype)
         print("analyzing return types")
         if return_types and len(return_types) >= 1:
             for i in return_types[1:]:
@@ -280,18 +322,27 @@ class ASTFunction(ASTNode):
                     return
             return_type = return_types[0]
         if not return_type:
-            return_type = "void"
+            return_type = void
         self.vtype = return_type
         ctx = ctx.pop()
+        ctx.add_object(self.name, {"obj": self})
+
         
     def compile(self, context: CodeGenContext):
         context = context.push(self.name)
         context.emit(IRSystem.ib.label(self.name))
-        for arg in self.args:
+
+        for idx, arg in enumerate(self.args):
             arg.compile(context)
-        
+
+            if idx < ARGS_REGISTERS:
+                context.update_variable_location(arg.name, TypedOperand(idx + 1, arg.vtype.reduce()))
+            elif idx >= ARGS_REGISTERS:
+                context.emit(IRSystem.ib.push(arg.reduce()))
         for statement in self.statements:
             statement.compile(context)
+        
+        context.emit(IRSystem.ib.ret())
         context = context.pop()
     
     def __repr__(self):
@@ -300,47 +351,51 @@ class ASTFunction(ASTNode):
 class ASTFuncCall(ASTNode):
     def __init__(self, name, args):
         self.name = name
-        self.args = args #list[ASTReference]
+        self.args: list[ASTReference] = args
         self.func = None
     
     def analyze(self, ctx: AnalyzeContext):
-        self.func = ctx.get_object(self.name)
+        print(f"Call {self.name} {self.args}")
+        self.func = ctx.get_object(self.name)["obj"]
         for idx, arg in enumerate(self.args):
             arg.analyze(ctx)
-
+            print(arg.vtype, self.func.args[idx].vtype)
             assert arg.vtype == self.func.args[idx].vtype
 
-
     def compile(self, context: CodeGenContext):
-        print(f"Call: {name}, Args: {args}")        
+        print(f"Call: {self.name}, Args: {self.args}")        
 
         for idx, arg in enumerate(self.args):
             arg.compile(context)
 
             if idx < ARGS_REGISTERS:
-                context.emit(IRSystem.ib.move(f"v{i + 1}", arg.address))
+                context.emit(IRSystem.ib.move(TypedOperand(idx+1, arg.vtype.reduce()), arg.reduce()))
             elif idx >= ARGS_REGISTERS:
-                context.emit(IRSystem.ib.push(arg.address))
+                context.emit(IRSystem.ib.push(arg.reduce()))
+        context.emit(IRSystem.ib.call(self.name))
+    def reduce(self):
+        return TypedOperand(0, self.func.vtype.reduce())
 
 class ASTDeclaration(ASTNode):
     def __init__(self, name, vtype, length=1):
         self.name = name
 
-        self.type = None
+        self.vtype = None
 
         if vtype in VTYPES:
             self.vtype = VTYPES[vtype]
         else:
             print(f"Error: Unknown Type {vtype}")
+            exit(1)
 
         self.length = length
-        self.size = self.vtype.size * self.length
+        self.size = self.vtype.size() * self.length
 
     def analyze(self, ctx: AnalyzeContext):
         if ctx.get_object(self.name):
             print("Error: Variable already declared")
             return False
-        ctx.add_object(name=self.name, obj={"type": self.vtype})
+        ctx.add_object(name=self.name, obj={"obj": self})
 
     def compile(self, context: CodeGenContext):
         context.new_var(self.name, self.vtype, self.length)
@@ -350,11 +405,10 @@ class ASTDeclaration(ASTNode):
 
 class ASTAssignment(ASTNode):
     def __init__(self, target, source):
-        self.target = source
-        self.source = target
+        self.target = target
+        self.source = source
     
     def analyze(self, context):
-        print(self)
         self.source.analyze(context)
         self.target.analyze(context)
 
@@ -362,7 +416,7 @@ class ASTAssignment(ASTNode):
         self.source.compile(context)
         self.target.compile(context)
         
-        dest, src = self.target.reduce(context), self.source.reduce(context)
+        dest, src = self.target.reduce(), self.source.reduce()
         context.emit(IRSystem.ib.move(dest, src))
 
     def __repr__(self):
@@ -380,12 +434,13 @@ class ASTNew(ASTNode):
     def compile(self, context: CodeGenContext):
         self.declaration.compile(context)
 
-        size = self.declaration.size
-        self.address = context.get_memory(size)
-        context.update_variable_address(self.declaration.name, self.address)
+        length = self.declaration.length
+        self.address = context.get_memory(self.declaration.vtype)
+        context.update_variable_location(self.declaration.name, self.address)
 
     def reduce(self, ctx: CodeGenContext):
-        return ctx.get_var(self.declaration.name).address
+        return TypedOperand(self.address, self.declaration.vtype.reduce())
+
 
     def __repr__(self):
         return f"new {self.declaration} ({self.address})"
@@ -403,11 +458,27 @@ class ASTMacro(ASTNode):
 
         for statement in self.block:
             statement.analyze(ctx)
-        ctx.add_object(self.name, self)
+        ctx.add_object("obj", self)
         ctx = ctx.pop()
 
     def compile(self, ctx):
         pass
+    
+    def assemble(self, args, ctx: CodeGenContext):
+        ctx = ctx.push(self.name)
+        for idx, arg in enumerate(self.args):
+            arg.compile(ctx)
+            source = args[idx]
+            print(arg.name, source)
+            ctx.update_variable_location(arg.name, source)
+        
+        for statement in self.block:
+            statement.compile(ctx)
+
+        ctx = ctx.pop()
+    def __repr__(self):
+        return f"Macro {self.name}"
+
 
 class ASTComparison(ASTNode):
     def __init__(self, left, op, right):
@@ -441,7 +512,13 @@ class ASTComparison(ASTNode):
     def __repr__(self):
         return f"{self.left} {self.op} {self.right}"
 
+op_macro_map = {
+    "+": "__add__",
+    "-": "__sub__",
+    "*": "__mul__",
+    "/": "__div__",
 
+}
 class ASTBinaryOp(ASTNode):
     def __init__(self, left, op, right):
         self.left = left #ASTReference
@@ -449,7 +526,9 @@ class ASTBinaryOp(ASTNode):
         self.op = op #string + - * /
 
         self.result = None # destination register / address
-    
+
+        self.macro = None #macro to handle the op
+
     def analyze(self, ctx):
         self.left.analyze(ctx)
         self.right.analyze(ctx)
@@ -461,18 +540,29 @@ class ASTBinaryOp(ASTNode):
             print("Error: op without types? Seriously?..")
             return
         if ltype != rtype:
-            print("Warning: op types not matching! ")
+            print(f"Error: op types not matching! {ltype}{self.op}{rtype}")
+            exit(1)
+            #TODO: implicit type casting?
         #print(f"Using type {ltype}")
+        macro_name = op_macro_map[self.op]
+
+        macro = ctx.symbols.get(self.left.vtype.name)
+        if not macro:
+            print(f"Error: Macro for operation {self.op} ({macro_name}) not implemented for {self.left.vtype.name}")
+            exit(1)
+        self.macro = macro[macro_name]["obj"]
 
     def compile(self, ctx: CodeGenContext):
         self.right.compile(ctx)
         self.left.compile(ctx)
-        self.result = ctx.new_reg()
-        # TODO: implement operation assembly
+        self.result = ctx.new_reg(self.left.vtype)
+        
+        if self.macro:
+            self.macro.assemble([self.reduce(), self.left.reduce(), self.right.reduce()], ctx)
+        else:
+            print(f"Macro for op {self.op} not found.")
 
-        ctx.emit(IRSystem.ib.move(self.result, self))
-
-    def reduce(self, ctx):
+    def reduce(self):
         return self.result
 
     def __repr__(self):
@@ -481,6 +571,8 @@ class ASTBinaryOp(ASTNode):
 branch_ib_map = {
     "==": IRSystem.ib.jne,
     "!=": IRSystem.ib.je,
+    # ">": IRSystem.ib.jgt,
+    # "<": IRSystem.ib.jlt,
 }
 
 class ASTIfStatement(ASTNode):
@@ -508,3 +600,24 @@ class ASTIfStatement(ASTNode):
 
     def __repr__(self):
         return f"if ({self.condition})"
+
+class ASTAsm(ASTNode):
+    def __init__(self, inst, args):
+        self.inst = None
+        try:
+            self.inst =  IMI[inst.upper()].value
+        except KeyError:
+            print(f"Error: unknown instruction: '{inst}'")
+        self.args = args
+    
+    def analyze(self, ctx: AnalyzeContext):
+        for arg in self.args:
+            arg.analyze(ctx)
+
+    def compile(self, ctx: CodeGenContext):
+        operands = []
+        for arg in self.args:
+            arg.compile(ctx)
+            operands.append(arg.reduce())
+
+        ctx.emit(Instruction(self.inst, operands))

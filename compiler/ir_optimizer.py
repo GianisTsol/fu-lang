@@ -35,7 +35,7 @@ class IROptimizer:
             inst for inst in instructions
             if not (inst.opcode == IMI.MOVE and inst.operands[0] == inst.operands[1])
         ]
-    
+
     @staticmethod
     def optimize(instructions: List[Instruction]) -> List[Instruction]:
         """Apply all optimizations."""
