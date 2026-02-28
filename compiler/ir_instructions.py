@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from typing import Any, Tuple, Union
-from config import IMI
+from config import IMI, InstructionSpecs
 
 
 @dataclass
@@ -22,8 +22,8 @@ class Instruction:
     def _validate(self):
         """Validate operand count and types."""
         validations = {
-            IMI.LOAD: (2,), IMI.STORE: (2,), IMI.MOVE: (2,),
-            IMI.PUSH: (1,), IMI.POP: (1,), IMI.JUMP: (1,),
+            IMI.MOVE: (2,),
+            IMI.JUMP: (1,),
             IMI.LABEL: (1,), IMI.ADD: (3,), IMI.SUB: (3,),
             IMI.MUL: (2,), IMI.DIV: (2,), IMI.CMP: (2,),
             IMI.JE: (1,), IMI.JNE: (1,), IMI.JGT: (1,),

@@ -8,7 +8,7 @@ from target import Amd64
 
 from ir_instructions import Instruction
 from ir_optimizer import IROptimizer
-from ir_analyzer import print_ir_code
+from ir_analyzer import print_ir_code, generate_operand_metadata, generate_instruction_metadata
 
 def compile_file(filename, debug=False, optimize=True):
     """Compile a source file to IR code."""
@@ -47,11 +47,11 @@ def compile_file(filename, debug=False, optimize=True):
         exit()
     # Generate IR
     ir_code = generator(ast)
-    
+    metadata = generate_instruction_metadata(ir_code)
     # Optimize if requested
     if optimize:
         instructions = [Instruction.from_tuple(inst) if type(inst) == tuple else inst for inst in ir_code]
-        optimized = IROptimizer.optimize(instructions)
+        optimized = IROptimizer.optimize(instructions, metadata)
         print_ir_code(optimized)
         return optimized
     else:
@@ -67,8 +67,9 @@ if __name__ == "__main__":
         no_opt = "--no-opt" in sys.argv
         
         ir = compile_file(filename, debug=debug, optimize=not no_opt)
+        metadata = generate_instruction_metadata(ir)
         final = Amd64()
-        final.compile(ir)
+        final.compile(ir, metadata)
     else:
         print("Usage: python main.py <filename> [--debug] [--no-opt]")
         print("\nExample:")

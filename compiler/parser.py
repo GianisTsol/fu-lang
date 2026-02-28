@@ -13,14 +13,21 @@ class Parser:
     
     def push(self):
         err_num = len(self.errors) 
-        self.stack.append((self.idx, err_num))
+        b_num = len(self.barriers)
+        self.stack.append((self.idx, err_num, b_num))
 
     def pop(self):
-        self.idx, err_num = self.stack.pop()
+        self.idx, err_num, b_num = self.stack.pop()
         self.errors = self.errors[0:err_num]
+        self.barriers = self.barriers[0:b_num]
 
-    def barrier(self):
-        self.barriers.append(self.idx)
+    def squash(self):
+        self.stack.pop()
+
+    def barrier(self, idx=-1):
+        if idx == -1:
+            idx = self.idx
+        self.barriers.append(idx)
 
     def available(self, ignore_barriers=False):
         if not ignore_barriers and self.idx + 1 in self.barriers:
@@ -122,7 +129,6 @@ class Block(SyntaxRule):
 
     def check(self, parser):
         start_tok = parser.expect(self.start_t)
-        print(start_tok)
         if not start_tok:
             return False, None
 
@@ -138,8 +144,10 @@ class Block(SyntaxRule):
             if depth == 0:
                 break
         
-        parser.barrier()
+        end = parser.idx
         parser.pop()
+        parser.barrier(end)
+
 
         # Parse contents
         success, contents_node = self.contents_rule.check(parser)
@@ -159,6 +167,7 @@ class Block(SyntaxRule):
 
     def __repr__(self):
         return f"Block({self.start_t}...{self.end_t})"
+    
 
 
 class Delimited(SyntaxRule):
@@ -189,7 +198,7 @@ class Delimited(SyntaxRule):
         return True, items
 
     def __repr__(self):
-        return f"Delimited({self.contents_rule})"
+        return f"Delimited({self.delimiter})"
 
 
 class Chain(SyntaxRule):
@@ -199,13 +208,15 @@ class Chain(SyntaxRule):
 
     def check(self, parser):
         nodes = []
-        
+        parser.push()
         for rule in self.rules:
             success, node = rule.check(parser)
             if not success:
+                parser.pop()
                 return False, None
             nodes.append(node)
         
+        parser.squash()
         # If node_class provided, construct it with all child nodes
         if self.node_class:
             return True, self.node_class(*nodes)
@@ -214,7 +225,8 @@ class Chain(SyntaxRule):
         return True, nodes
 
     def __repr__(self):
-        return f"Chain({', '.join(str(r) for r in self.rules)})"
+        # return f"Chain({', '.join(str(r) for r in self.rules)})"
+        return f"Chain({len(self.rules)})"
 
 
 class Keyword(SyntaxRule):
@@ -284,22 +296,32 @@ class Any(SyntaxRule):
             parser.push()
             success, node = option.check(parser)
             if success:
+                parser.squash()
                 if self.node_class:
                     return True, self.node_class(node)
                 return True, node
             parser.pop()
         return False, None
+    
+    def __repr__(self):
+        return f"Any({len(self.options)})"
 
 class Optional(SyntaxRule):
     def __init__(self, option):
         self.option = option
     
     def check(self, parser):
+        parser.push()
         success, node = self.option.check(parser)
         if success:
+            parser.squash()
             return True, node
         else:
+            parser.pop()
             return True, None
+
+    def __repr__(self):
+        return f"Optional({repr(self.option)})"
 
 class Operand(SyntaxRule):
     def check(self, parser):
@@ -340,39 +362,46 @@ class Statements(SyntaxRule):
     def check(parser):
         statement_nodes = []
         best_errors, progress = None, 0
-        
+        Statement.offs += 4
+
         while parser.available():
             found = False
-            
+            print("=======\n", "LOOP\n", "========\n")
+
             for depth, (name, rule) in enumerate(Statements.statements.items()):
                 parser.push()
-                print(name)
+
+                print(name, parser.token)
+
                 success, node = rule.check(parser)
-                
                 if success:
                     found = True
                     statement_nodes.append(node)
-                    print(f"{name} checked out! ")
-
                     break
-                
+                print(parser.errors)
+
                 # Track furthest failure
                 if parser.idx * (len(Statements.statements) - depth) > progress:
                     progress = parser.idx * (len(Statements.statements) - depth)
                     best_errors = parser.errors.copy()
-                
                 parser.pop()
+
+                
 
             if found:
                 # Expect semicolon after statement
                 if not parser.expect(";"):
+                    statement_nodes.pop()
+                    parser.pop()
                     return False, None
+                parser.squash()
             else:
+
                 # No statement matched - restore best error
                 if best_errors:
                     parser.errors = best_errors
-                print(f"{name} failed..")
                 parser.idx = progress
+
                 return False, None
         
         return True, statement_nodes
@@ -380,16 +409,26 @@ class Statements(SyntaxRule):
     @staticmethod
     def register(name, rule):
         Statements.statements[name] = rule
+    
 
 
 class Statement(SyntaxRule):
+    offs = 0
+
     def __init__(self, name=None):
         self.name = name
 
     def check(self, parser):
         if not self.name:
             return False, None
-        return Statements.statements[self.name].check(parser)
+        print(f"{' '*Statement.offs}TEST {self.name} {parser.token}")
+        Statement.offs += 4
+        success, node = Statements.statements[self.name].check(parser)
+
+        Statement.offs -= 4
+        print(f"{' '*Statement.offs}{'PASS' if success else 'FAIL'} {self.name} L{parser.token.line}C{parser.token.col} {parser.token}")
+
+        return success, node
 
     def __repr__(self):
         return f"Statement({self.name})"
@@ -433,7 +472,6 @@ def ExpressionBuilder(left, op_tok, right):
         op = "".join(t.value for t in op_tok)
     else:
         op = op_tok.value
-    print(left)
     obj = None
     if op in ["/", "*", "+", "-"]:
         obj = ASTBinaryOp(left, op, right)
@@ -449,6 +487,7 @@ def RefBuilder(name_obj):
     name, idx = name_obj
     try:
         j = int(name)
+        print("AAAAAAAAAAAAAAAAAAAAAA\nAAAAA\nAA")
         return ASTStatic(j) 
     except ValueError:
         pass
@@ -458,7 +497,7 @@ def NameBuilder(tok, opt_size):
     print("NAMEEE: ", tok, opt_size)
     name = tok.value
     size = 1
-    if opt_size:
+    if opt_size != None:
         size = opt_size
     return (name, opt_size)
 
@@ -470,6 +509,7 @@ def IfBuilder(keyword, condition, block):
 # ==============================================================
 
 Ref = lambda l: Name(l, node_class=RefBuilder)
+
 
 Statements.register("class", Chain(
     Keyword("class"),

@@ -3,6 +3,9 @@
 from config import ARGS_REGISTERS
 from ir_instructions import InstructionBuilder, Instruction
 
+from enum import IntEnum
+
+
 class Type:
     def __init__(self, size, signed):
         self.size: int = size
@@ -13,13 +16,27 @@ class Type:
     def __repr__(self):
         return f"<{'i' if self.signed else 'u'}{self.size}>"
 
-class TypedOperand:
-    def __init__(self, idx, vtype, lifetime=0, data=b""):
-        self.idx = idx
+from enum import Enum
 
-        assert type(idx) == int
+class Lifetimes(IntEnum):
+    STATIC = 5
+    GLOBAL = 4
+    LOCAL = 3
+    ARG = 2
+    RETURN = 1
+    TEMP = 0
+
+
+class TypedOperand:
+    idx = 0
+    def __init__(self, vtype, lifetime=Lifetimes.TEMP, group=0, data=b""):
+        TypedOperand.idx += 1
+        self.idx = TypedOperand.idx
+        
+        self.group = group
+        assert type(vtype) == Type
         self.vtype = vtype
-        self.lifetime = 0
+        self.lifetime = lifetime
         self.is_ptr = False
 
         self.data = data
@@ -28,40 +45,13 @@ class TypedOperand:
         raise NotImplementedError()
 
     def __repr__(self):
-        return f"[L{self.lifetime}]:V{self.idx}:{self.vtype}"
+        return f"[L{self.lifetime.name}]:V{self.idx}:{self.vtype}"
 
-class Immediate:
-    def __init__(self, value):
-        try:
-            self.value = int(value)
-        except ValueError:
-            print("Error: immediate thats not an int?")
-            exit(1)
-        
-    def bytes_required(self, value: int, signed: bool = True) -> int:
-        if signed:
-            # Signed integers use two's complement
-            if value >= 0:
-                bits = value.bit_length() + 1  # sign bit
-            else:
-                bits = (-value - 1).bit_length() + 1
-        else:
-            if value < 0:
-                raise ValueError("Unsigned representation cannot be negative")
-            bits = value.bit_length()
-
-        return max(1, (bits + 7) // 8)
-
-    def to_hex_bytes(self, value: int, size: int, signed: bool = True) -> str:
-        if size <= 0:
-            raise ValueError("size must be positive")
-        if not signed and value < 0:
-            raise ValueError("Unsigned representation cannot be negative")
-
-        return value.to_bytes(size, byteorder="big", signed=signed).hex()
-
-    def __repr__(self):
-        return f"{self.value}"
+class OperandGroup:
+    idx = 1
+    def __init__(self):
+        OperandGroup.idx += 1
+        self.idx = OperandGroup.idx
 
 
 class Address:

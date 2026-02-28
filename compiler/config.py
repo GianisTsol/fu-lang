@@ -10,8 +10,6 @@ ARGS_REGISTERS = 4
 
 class IMI(IntEnum):
     """Intermediate Machine Instruction opcodes."""
-    LOAD = 0
-    STORE = 1
     MOVE = 2
     PUSH = 3
     POP = 4
@@ -29,6 +27,28 @@ class IMI(IntEnum):
     CALL = 16
     RET = 17
     NOP = 18
+
+class Spec:
+    def __init__(self, number_of_operands, operands_affected=[]):
+        self.number_of_operands = number_of_operands
+        self.operands_affected = operands_affected
+        
+InstructionSpecs = {
+    IMI.MOVE: Spec(2, [0]),
+    IMI.JUMP: Spec(1, []),
+    IMI.LABEL: Spec(1, []),
+    IMI.ADD: Spec(3, [0]),
+    IMI.SUB: Spec(3, [0]),
+    IMI.MUL: Spec(3, [0]),
+    IMI.DIV: Spec(3, [0]),
+    IMI.CMP: Spec(2, []),
+    IMI.CALL: Spec(1, []),
+    IMI.RET: Spec(1, []),
+    IMI.PUSH: Spec(1, []),
+    IMI.POP: Spec(1, [0]),
+
+}
+
 
 
 class ParseError(Exception):

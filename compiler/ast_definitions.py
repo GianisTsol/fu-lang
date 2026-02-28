@@ -1,4 +1,4 @@
-from ir_system import IRSystem, Instruction, Type, Address, TypedOperand, Immediate
+from ir_system import IRSystem, Instruction, Type, Address, TypedOperand, Lifetimes, OperandGroup
 from config import IMI, ARGS_REGISTERS
 
 void = Type(0, False)
@@ -8,7 +8,7 @@ u8    = Type(1, False)
 ptr   = Type(8, False)
 
 
-class FuType:
+class FuType(Type):
     def __init__(self, name, obj):
         self.name = name
         self.obj = obj
@@ -162,7 +162,7 @@ class CodeGenContext:
         self.vars[name].size = vtype.size() * length
 
     def get_memory(self, vtype):
-        a = TypedOperand(self.stack_ptr_reg, vtype.reduce())
+        a = TypedOperand(vtype.reduce())
         self.stack_ptr_reg += 1
         self.stack_offset += vtype.size()
         #self.emit(IRSystem.ib.add(Register(self.stack_ptr_reg), Register(self.stack_ptr_reg), Immediate(size)))
@@ -180,7 +180,7 @@ class CodeGenContext:
         self.reg_count += 1
         if self.stack_ptr_reg == self.reg_count:
             self.reg_count += 1
-        return TypedOperand(self.reg_count, vtype.reduce())
+        return TypedOperand(vtype.reduce())
 
     def update_variable_location(self, name, location):
         a = self.get_var(name)
@@ -209,7 +209,7 @@ class ASTStatic(ASTNode):
 
     def compile(self, ctx):
         self.store = ctx.get_memory(self.vtype)
-        self.store.lifetime = 3 #todo: define lifetypes better
+        self.store.lifetime = Lifetimes.STATIC #todo: define lifetypes better
         self.store.data = self.data
 
     def reduce(self):
@@ -234,10 +234,8 @@ class ASTReference:
     
     def compile(self, ctx: CodeGenContext):
         var: CodeGenVar = ctx.get_var(self.name)
-        if self.index > 0:
-            self.location = var.location.add(self.index * self.vtype.size)
-        else:
-            self.location = var.location
+
+        self.location = var.location
 
     def reduce(self):
         return self.location
@@ -289,14 +287,17 @@ class ASTReturn:
     
     def compile(self, ctx):
         self.ref.compile(ctx)
-        ctx.emit(IRSystem.ib.move(TypedOperand(0, self.vtype.reduce()), self.ref.reduce()))
-
+        assert type(self.vtype) == FuType
+        ctx.emit(IRSystem.ib.move(TypedOperand(self.vtype.reduce(), lifetime=Lifetimes.RETURN), self.ref.reduce()))
+    
 class ASTFunction(ASTNode):
     def __init__(self, name, args, statements):
         self.name = name
         self.args: list[ASTDeclaration] = args
         self.statements = statements
         self.vtype = None
+
+        self.return_operand = None
     
     def analyze(self, ctx: AnalyzeContext):
         ctx = ctx.push(self.name)
@@ -332,13 +333,14 @@ class ASTFunction(ASTNode):
         context = context.push(self.name)
         context.emit(IRSystem.ib.label(self.name))
 
+        arg_group = OperandGroup()
         for idx, arg in enumerate(self.args):
             arg.compile(context)
 
-            if idx < ARGS_REGISTERS:
-                context.update_variable_location(arg.name, TypedOperand(idx + 1, arg.vtype.reduce()))
-            elif idx >= ARGS_REGISTERS:
-                context.emit(IRSystem.ib.push(arg.reduce()))
+            loc = TypedOperand(arg.vtype.reduce(), lifetime=Lifetimes.ARG, group=arg_group)
+            context.update_variable_location(arg.name, loc)
+            arg.location = loc
+            
         for statement in self.statements:
             statement.compile(context)
         
@@ -364,17 +366,20 @@ class ASTFuncCall(ASTNode):
 
     def compile(self, context: CodeGenContext):
         print(f"Call: {self.name}, Args: {self.args}")        
+        if not self.func:
+            print("Error: cant call {self.name} because it doesnt exist.")
+            exit(1)
+        assert len(self.args) == len(self.func.args)
+        for idx, (fdef, fref) in enumerate(zip(self.func.args, self.args)):
+            fref.compile(context)
 
-        for idx, arg in enumerate(self.args):
-            arg.compile(context)
+            context.emit(IRSystem.ib.move(fdef.reduce(), fref.reduce()))
 
-            if idx < ARGS_REGISTERS:
-                context.emit(IRSystem.ib.move(TypedOperand(idx+1, arg.vtype.reduce()), arg.reduce()))
-            elif idx >= ARGS_REGISTERS:
-                context.emit(IRSystem.ib.push(arg.reduce()))
         context.emit(IRSystem.ib.call(self.name))
+
+
     def reduce(self):
-        return TypedOperand(0, self.func.vtype.reduce())
+        return TypedOperand(self.func.vtype.reduce(), lifetime=Lifetimes.RETURN)
 
 class ASTDeclaration(ASTNode):
     def __init__(self, name, vtype, length=1):
@@ -391,6 +396,8 @@ class ASTDeclaration(ASTNode):
         self.length = length
         self.size = self.vtype.size() * self.length
 
+        self.location = None
+
     def analyze(self, ctx: AnalyzeContext):
         if ctx.get_object(self.name):
             print("Error: Variable already declared")
@@ -400,6 +407,11 @@ class ASTDeclaration(ASTNode):
     def compile(self, context: CodeGenContext):
         context.new_var(self.name, self.vtype, self.length)
 
+    def reduce(self):
+        if not self.location:
+            print("Error: {self.name} not initialized.")
+            exit(1)
+        return self.location
     def __repr__(self):
         return f"{self.name}: {self.vtype}[{self.length}]"
 
@@ -434,12 +446,11 @@ class ASTNew(ASTNode):
     def compile(self, context: CodeGenContext):
         self.declaration.compile(context)
 
-        length = self.declaration.length
-        self.address = context.get_memory(self.declaration.vtype)
+        self.address = TypedOperand(self.declaration.vtype.reduce(), lifetime=Lifetimes.LOCAL)
         context.update_variable_location(self.declaration.name, self.address)
 
     def reduce(self, ctx: CodeGenContext):
-        return TypedOperand(self.address, self.declaration.vtype.reduce())
+        return self.address
 
 
     def __repr__(self):

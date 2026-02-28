@@ -1,5 +1,5 @@
 from config import IMI
-from ir_system import TypedOperand, Immediate, Address
+from ir_system import TypedOperand, Lifetimes
 
 class Amd64:
     USIZE = 8 # bytes
@@ -22,6 +22,54 @@ class Amd64:
             if size not in table or table[size] is None:
                 raise ValueError(f"Register does not support {size}-bit access")
             return table[size]
+
+    class Immediate:
+        def __init__(self, value):
+            try:
+                self.value = int(value)
+            except ValueError:
+                print("Error: immediate thats not an int?")
+                exit(1)
+            
+        def bytes_required(self, value: int, signed: bool = True) -> int:
+            if signed:
+                # Signed integers use two's complement
+                if value >= 0:
+                    bits = value.bit_length() + 1  # sign bit
+                else:
+                    bits = (-value - 1).bit_length() + 1
+            else:
+                if value < 0:
+                    raise ValueError("Unsigned representation cannot be negative")
+                bits = value.bit_length()
+
+            return max(1, (bits + 7) // 8)
+
+        def to_hex_bytes(self, value: int, size: int, signed: bool = True) -> str:
+            if size <= 0:
+                raise ValueError("size must be positive")
+            if not signed and value < 0:
+                raise ValueError("Unsigned representation cannot be negative")
+
+            return value.to_bytes(size, byteorder="big", signed=signed).hex()
+        
+        def reduce(self, size):
+            rq = self.bytes_required(self.value)
+            if size < rq:
+                print("Immediate to big. Maybe place it in memory?")
+                exit(1)
+            return self.to_hex_bytes(self.value, size)
+
+        def __repr__(self):
+            return f"{self.value}"
+
+    class Address:
+        def __init__(self, offset):
+            self.offset = offset
+        
+        def reduce(self, size):
+            ss = Amd64.size_specifiers[size*8]
+            return f"{ss} [RSP+{self.offset}]"
 
     gprs = {
         "RAX": GeneralRegister("rax", "eax", "ax", "al", "ah"),
@@ -50,32 +98,141 @@ class Amd64:
         32: "dword",
         64: "qword",
     }
+
     def __init__(self):
         self.name = "x86_64"
 
         self.register_names = list(self.gprs.keys())
+        self.register_names.reverse()
 
-    def compile(self, ir_code):
+        self.argument_registers = ["RDI", "RSI", "RDX", "RCX", "R8", "R9"]
+        self.return_register = "RAX"
+        self.stack_pointer = "RSP"
+
+        self.free_registers = sorted(self.register_names, key=lambda x: len(self.argument_registers) - self.argument_registers.index(x) if x in self.argument_registers else 0)
+        self.used_registers = []
+
+        self.size_allocated = 0
+        self.operand_location_map = {}
+
+        self.code = []
+        
+    def emit(self, text):
+        self.code.append(text)
+
+    def force_free_register(self, name):
+        if name not in self.register_names:
+            exit(1)
+        if name in self.free_registers:
+            return
+        other = self.get_register()
+
+        self.emit(f"mov {other}, {name}")
+
+        idx = None
+        for k, v in self.operand_location_map.items():
+            if v == name:
+                idx = k
+        self.operand_location_map[idx] = self.gprs[other]
+        self.used_registers.remove(name)
+        self.free_registers.append(name)
+
+    def get_register(self, name=None):
+        if name:
+            if name not in self.register_names:
+                exit(1)
+            if name in self.free_registers:
+                reg = name
+            else:
+                raise("register in use. try a force free first?")
+        else:
+            score, best = 0, None
+            for reg in self.free_registers:
+                c = 0
+                if reg.lower() not in self.argument_registers:
+                    c += 1
+                if reg.upper() is not self.return_register.upper():
+                    c += 2
+                if c > score:
+                    best = reg
+                    score = c
+            reg = best
+        print(self.free_registers)
+        self.free_registers.remove(reg)
+        self.used_registers.append(reg)
+        return reg
+
+    def free_register(self, name):
+        name = name.upper()
+        if name not in self.register_names:
+            print(f"Unkown register. '{name}'")
+            print(self.register_names)
+            raise UnboundLocalError
+            exit(1)
+        if name not in self.used_registers:
+            print(f"Cant free the free... '{name}'")
+            return
+        self.used_registers.remove(name)
+        self.free_registers.append(name)
+
+    def allocate_memory(self, size):
+        size = (size + 15) & ~15
+        self.emit(f"sub rsp, {size}")
+        self.size_allocated += size
+
+    def allocate_operand(self, op: TypedOperand):
+        result = Amd64.Immediate(12340)
+
+        if op.lifetime == Lifetimes.TEMP:
+            n = self.get_register()
+            result = self.gprs[n]
+        elif op.lifetime == Lifetimes.RETURN:
+            result = self.gprs[self.return_register]
+        elif op.lifetime == Lifetimes.ARG:
+            for reg in self.argument_registers:
+                if reg in self.free_registers:
+                    result = self.gprs[self.get_register(name=reg)]
+                    break
+        elif op.lifetime == Lifetimes.LOCAL:
+            self.allocate_memory(op.vtype.size)
+            result = Amd64.Address(self.size_allocated + op.vtype.size)
+
+        elif op.lifetime == Lifetimes.STATIC:
+            result = Amd64.Immediate(op.data)
+        self.operand_location_map[op.idx] = result
+
+    def free_operand(self, idx):
+        print(idx)
+        loc = self.operand_location_map[idx]
+        self.operand_location_map.pop(idx)
+        if isinstance(loc, Amd64.GeneralRegister):
+            self.free_register(loc.reg64)
+
+    def get_operand_location(self, op):
+        if op.idx in self.operand_location_map:
+            return self.operand_location_map[op.idx]
+        else:
+            self.allocate_operand(op)
+            return self.operand_location_map[op.idx]
+
+    def compile(self, ir_code, metadata):
         print("="*60)
         print(self.name)
         print("="*60)
-        result = []
-        for inst in ir_code:
-            result.extend(self.compile_instruction(inst))
-        
-        for r in result:
+        print(f"Free registers: {', '.join(self.free_registers)}")
+        for idx, inst in enumerate(ir_code):
+            meta = metadata[idx]
+            self.compile_instruction(inst)
+
+            for k in meta["last"]:
+                self.free_operand(k)
+
+        for r in self.code:
             print(r)
     
     def compile_operand(self, op, size=USIZE):
         if isinstance(op, TypedOperand):
-            if op.lifetime == 0:
-                print(op.idx)
-                reg = self.gprs[self.register_names[op.idx]].reduce(size)
-                return reg
-            elif op.lifetime == 1:
-                return 0
-            elif op.lifetime == 3:
-                return str(op.data)
+            return self.get_operand_location(op).reduce(op.vtype.size)
         elif isinstance(op, str):
             return op
         else:
@@ -83,24 +240,30 @@ class Amd64:
             exit(1)
 
     def compile_instruction(self, inst):
-        result = []
         params = []
         for op in inst.operands:
             params.append(self.compile_operand(op))
-            print(op, params)
+        print(inst.operands, params)
         if inst.opcode == IMI.ADD:
             if params[0] != params[1]:
-                result.append(f"mov {params[0]}, {params[1]}")
-            result.append(f"add {params[0]}, {params[2]}")
+                self.emit(f"mov {params[0]}, {params[1]}")
+            self.emit(f"add {params[0]}, {params[2]}")
         elif inst.opcode == IMI.SUB:
-            result.append(f"mov {params[0]}, {params[1]}")
-            result.append(f"sub {params[0]}, {params[2]}")
+            self.emit(f"mov {params[0]}, {params[1]}")
+            self.emit(f"sub {params[0]}, {params[2]}")
         elif inst.opcode == IMI.LABEL:
-            result.append(f"{params[0]}:")
+            self.size_allocated = 0
+            self.emit(f"{params[0]}:")
+            self.emit("push rbp")
+            self.emit("mov rbp, rsp")
         elif inst.opcode == IMI.RET:
-            result.append("ret")
+            self.emit("mov rsp, rbp")
+            self.emit("pop rbp")
+            self.emit("ret")
         elif inst.opcode == IMI.CALL:
-            result.append(f"call {params[0]}")
+            self.force_free_register(self.return_register)
+            self.emit(f"call {params[0]}")
+            self.free_register(self.return_register)
 
         elif inst.opcode == IMI.MOVE:
             c = 'mov'
@@ -110,8 +273,10 @@ class Amd64:
                         c = 'movsx'
                     elif inst.operands[0].vtype.signed == False:
                         c = 'movzx'
-            result.append(f"{c} {', '.join(params)}")
-        return result
+                    if isinstance(inst.operands[0], Amd64.Address):
+                        tmp = self.gprs[self.get_register()].reduce(inst.operands[0].vtype.size)
+                        self.emit(f"movvv {tmp}, {params[0]}")
+            self.emit(f"{c} {', '.join(params)}")
 
 
 
