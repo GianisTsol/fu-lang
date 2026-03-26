@@ -56,7 +56,7 @@ class OperandGroup:
 
 class Address:
     def __init__(self, reg, offset, vtype=None):
-        self.reg = reg
+        self.operand = reg
         self.offset = offset
 
     def add(self, other):

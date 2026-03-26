@@ -5,7 +5,6 @@ void = Type(0, False)
 usize = Type(8, False)
 isize = Type(8, True)
 u8    = Type(1, False)
-ptr   = Type(8, False)
 
 
 class FuType(Type):
@@ -22,22 +21,26 @@ class FuType(Type):
         if self.is_primitive():
             return self.obj.size
         else:
+            print(self.obj)
             return self.obj.size()
     
     def reduce(self):
         if self.is_primitive():
             return self.obj
         else:
-            return ptr
+            return self.obj.reduce()
     def __repr__(self):
         return f"vFu:<{self.name}:{self.obj}>"
 
 
 VTYPES = {
-    "void:": FuType("void", void),
+    "void": FuType("void", void),
     "usize": FuType("usize", usize),
     "u8": FuType("u8", u8),
     "isize": FuType("isize", isize),
+    "type": FuType("type", void),
+    "ptr": FuType("ptr", usize),
+
 }
 
 class SymbolTable:
@@ -202,7 +205,7 @@ class ASTStatic(ASTNode):
     def __init__(self, data):
         self.vtype = None
         if isinstance(data, int):
-            self.vtype = VTYPES["usize"]
+            self.vtype = FuType("static", Type(self._bytes_required(data), signed=True))
         
         self.data = data
         self.store = None
@@ -212,6 +215,15 @@ class ASTStatic(ASTNode):
         self.store.lifetime = Lifetimes.STATIC #todo: define lifetypes better
         self.store.data = self.data
 
+    def _bytes_required(self, v, signed=True):
+        if signed:
+            bits = (v.bit_length() + 1) if v >= 0 else ((-v - 1).bit_length() + 1)
+        else:
+            if v < 0:
+                raise ValueError("Unsigned representation cannot be negative")
+            bits = v.bit_length()
+        return max(1, (bits + 7) // 8)
+        
     def reduce(self):
         return self.store
     
@@ -219,22 +231,39 @@ class ASTStatic(ASTNode):
         return f"static {self.data}: {self.vtype}"
 
 class ASTReference:
-    def __init__(self, name, index=0):
+    def __init__(self, name, index=None, space = None):
         self.name = name
         self.vtype: Type = None
         self.location = None
-        self.index: int = index
+        self.index = index
+
 
     def analyze(self, ctx: AnalyzeContext):
         decl = ctx.get_object(self.name)
-        if not decl:
+        if self.index:
+            self.index.analyze(ctx)
+        if decl == None:
+            print('>'.join(ctx.symbols.stack))
             print(f"Error: Unknown object ({self.name})[{self.index}] {decl}")
             exit(1)
         self.vtype = decl["obj"].vtype
-    
+
+
     def compile(self, ctx: CodeGenContext):
         var: CodeGenVar = ctx.get_var(self.name)
+        if self.index is not None:
+            vtable = ctx.get_var(self.vtype.name)
+            if not vtable:
+                print(f"Error: vtable not found for type {self.vtype.name}")
+                print(ctx)
+                exit(1)
 
+            if "__index__" not in vtable:
+                print('>'.join(ctx.symbols.stack))
+                print(f"Error: {self.vtype.name} ({self.name}) does not support indexing.")
+                exit(1)
+            macro = vtable["__index__"]["obj"]
+            macro.assemble([self.index.reduce()], ctx)
         self.location = var.location
 
     def reduce(self):
@@ -244,13 +273,42 @@ class ASTReference:
     def __repr__(self):
         return f"ref {self.name}[{self.index}]: {self.vtype} ({self.location})"
 
-    
+class AstTarget(ASTNode):
+    def __init__(self, name, block: list[ASTNode]):
+        self.name = name
+    def analyze(self, ctx):
+        self.parent.analyze(ctx)
+        ctx.push(self.parent.name)
+        self.child.analyze(ctx)
+        ctx.pop()
+    def compile(self, ctx):
+        ctx.push(self.parent.name)
+        self.child.compile(ctx)
+        
+        ctx.pop()
+
+class ASTAtrribute(ASTNode):
+    def __init__(self, parent: ASTReference, child: ASTReference):
+        self.parent = parent
+        self.child = child
+        self.vtype = child.vtype
+    def analyze(self, ctx):
+        self.parent.analyze(ctx)
+        ctx.push(self.parent.name)
+        self.child.analyze(ctx)
+        ctx.pop()
+    def compile(self, ctx):
+        ctx.push(self.parent.name)
+        self.child.compile(ctx)
+        
+        ctx.pop()
+
 class ASTClass(ASTNode):
     def __init__(self, name, statements):
         self.name = name
         self.statements = statements
 
-        self.size = 0
+        self.size_ = 1
 
 
     def analyze(self, ctx: AnalyzeContext):
@@ -261,7 +319,26 @@ class ASTClass(ASTNode):
             if isinstance(statement, ASTDeclaration):
                 self.size += statement.size
         ctx = ctx.pop()
+        vtable = ctx.get_object(self.name)
+        if not vtable:
+            print(f"Error: Table for type {self.vtype.name} not found.")
+            exit(1)
+        if self.name in VTYPES:
+            self.vtype = VTYPES[self.name]
+        else:
+            VTYPES[self.name] = FuType(self.name, self)
 
+            if "__dec__" not in vtable:
+                print(f"Error: no definition (__dec__ macro) for class {self.name}")
+                exit(1)
+            macro = vtable["__dec__"]["obj"]
+            self.vtype = macro.vtype
+
+    def size(self):
+        return self.size_
+
+    def reduce(self):
+        return self.vtype.reduce()
     def compile(self, context: CodeGenContext):
         """Handle class declarations."""
         ctx = context.push(self.name)
@@ -275,7 +352,8 @@ class ASTClass(ASTNode):
     def __str__(self):
         inner = ", ".join(str(s) for s in self.statements)
         return f"Class {self.name} ([{inner}])"
-    
+
+
 class ASTReturn:
     def __init__(self, ref: ASTReference):
         self.ref = ref
@@ -350,21 +428,32 @@ class ASTFunction(ASTNode):
     def __repr__(self):
         return f"Func {self.name} -> {self.vtype}"
 
+def _builtin_sizeof(node):
+    pass
+BUILTINS = {"sizeof": _builtin_sizeof}
 class ASTFuncCall(ASTNode):
     def __init__(self, name, args):
         self.name = name
         self.args: list[ASTReference] = args
         self.func = None
+
+        self.vtype = None
     
     def analyze(self, ctx: AnalyzeContext):
+        if self.name in BUILTINS:
+            self.vtype = VTYPES["usize"]
+            return
         print(f"Call {self.name} {self.args}")
         self.func = ctx.get_object(self.name)["obj"]
+        self.vtype = self.func.vtype
         for idx, arg in enumerate(self.args):
             arg.analyze(ctx)
             print(arg.vtype, self.func.args[idx].vtype)
             assert arg.vtype == self.func.args[idx].vtype
 
     def compile(self, context: CodeGenContext):
+        if self.name in BUILTINS:
+            return
         print(f"Call: {self.name}, Args: {self.args}")        
         if not self.func:
             print("Error: cant call {self.name} because it doesnt exist.")
@@ -379,6 +468,8 @@ class ASTFuncCall(ASTNode):
 
 
     def reduce(self):
+        if self.name in BUILTINS:
+            return TypedOperand(VTYPES["usize"].reduce(), lifetime=Lifetimes.STATIC)
         return TypedOperand(self.func.vtype.reduce(), lifetime=Lifetimes.RETURN)
 
 class ASTDeclaration(ASTNode):
@@ -386,26 +477,31 @@ class ASTDeclaration(ASTNode):
         self.name = name
 
         self.vtype = None
-
-        if vtype in VTYPES:
-            self.vtype = VTYPES[vtype]
-        else:
-            print(f"Error: Unknown Type {vtype}")
-            exit(1)
-
-        self.length = length
-        self.size = self.vtype.size() * self.length
+        self.vtype_ = vtype
 
         self.location = None
 
     def analyze(self, ctx: AnalyzeContext):
         if ctx.get_object(self.name):
             print("Error: Variable already declared")
+            exit(1)
             return False
-        ctx.add_object(name=self.name, obj={"obj": self})
+        vtype = self.vtype_
+        if vtype[0] in VTYPES:
+            self.vtype = VTYPES[vtype[0]]
+        else:
+            print(f"Error: Unknown Type {vtype[0]}")
+            print(VTYPES.keys())
+            exit(1)
+        if self.vtype is None:
+            print(f"Error: complex type {vtype[0]} reduces to None.")
+            exit(1)
+        self.size = self.vtype.size()
+
+        ctx.add_object(name=self.name, obj={"obj": self, "size": {"obj": ASTStatic(self.size)}})
 
     def compile(self, context: CodeGenContext):
-        context.new_var(self.name, self.vtype, self.length)
+        context.new_var(self.name, self.vtype, 1)
 
     def reduce(self):
         if not self.location:
@@ -413,7 +509,7 @@ class ASTDeclaration(ASTNode):
             exit(1)
         return self.location
     def __repr__(self):
-        return f"{self.name}: {self.vtype}[{self.length}]"
+        return f"{self.name}: {self.vtype}"
 
 class ASTAssignment(ASTNode):
     def __init__(self, target, source):
@@ -467,10 +563,30 @@ class ASTMacro(ASTNode):
         for arg in self.args:
             arg.analyze(ctx)
 
+        return_type = None
+        return_types = []
+
         for statement in self.block:
             statement.analyze(ctx)
-        ctx.add_object("obj", self)
+            print(f"Analyzed: {statement}")
+
+            if isinstance(statement, ASTReturn):
+                return_types.append(statement.vtype)
+        print("analyzing return types")
+        if return_types and len(return_types) >= 1:
+            for i in return_types[1:]:
+                if i != return_types[0]:
+                    return_type = None
+                    print(f"Error: Macro returns too many types: {return_types}")
+                    return
+            return_type = return_types[0]
+        if not return_type:
+            return_type = void
+        self.vtype = return_type
+
         ctx = ctx.pop()
+        ctx.add_object(self.name, {"obj": self})
+
 
     def compile(self, ctx):
         pass
@@ -540,10 +656,12 @@ class ASTBinaryOp(ASTNode):
 
         self.macro = None #macro to handle the op
 
+        self.vtype = None
+
     def analyze(self, ctx):
         self.left.analyze(ctx)
         self.right.analyze(ctx)
-
+        self.vtype = self.left.vtype
         ltype = self.left.vtype
         rtype = self.right.vtype
         print(f"Handling op: {self.left} {self.op} {self.right}")
@@ -566,12 +684,28 @@ class ASTBinaryOp(ASTNode):
     def compile(self, ctx: CodeGenContext):
         self.right.compile(ctx)
         self.left.compile(ctx)
-        self.result = ctx.new_reg(self.left.vtype)
-        
-        if self.macro:
-            self.macro.assemble([self.reduce(), self.left.reduce(), self.right.reduce()], ctx)
+
+        if isinstance(self.left, ASTStatic) and isinstance(self.right, ASTStatic):
+            res = 0
+            if self.op == "+":
+                res = self.left.data + self.right.data
+            elif self.op == "-":
+                res = self.left.data - self.right.data
+            elif self.op == "*":
+                res = self.left.data * self.right.data
+            elif self.op == "/":
+                res = self.left.data // self.right.data
+            st = ASTStatic(res)
+            st.compile(ctx)
+
+            self.result = st.store
         else:
-            print(f"Macro for op {self.op} not found.")
+            self.result = ctx.new_reg(self.left.vtype)
+        
+            if self.macro:
+                self.macro.assemble([self.reduce(), self.left.reduce(), self.right.reduce()], ctx)
+            else:
+                print(f"Macro for op {self.op} not found.")
 
     def reduce(self):
         return self.result

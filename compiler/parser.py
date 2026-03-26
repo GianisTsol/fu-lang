@@ -14,15 +14,22 @@ class Parser:
     def push(self):
         err_num = len(self.errors) 
         b_num = len(self.barriers)
-        self.stack.append((self.idx, err_num, b_num))
+        self.stack.append((self.idx, err_num, b_num, self.furthest_error))
 
     def pop(self):
-        self.idx, err_num, b_num = self.stack.pop()
+        self.idx, err_num, b_num, prev_furthest = self.stack.pop()
         self.errors = self.errors[0:err_num]
         self.barriers = self.barriers[0:b_num]
+        self.token = self.tokens[self.idx] if self.idx >= 0 else None
+        # Keep whichever furthest_error reached deepest
+        if prev_furthest and (not self.furthest_error or prev_furthest['pos'] > self.furthest_error['pos']):
+            self.furthest_error = prev_furthest
 
     def squash(self):
-        self.stack.pop()
+        _, _, _, prev_furthest = self.stack.pop()
+        # Keep whichever furthest_error reached deepest
+        if prev_furthest and (not self.furthest_error or prev_furthest['pos'] > self.furthest_error['pos']):
+            self.furthest_error = prev_furthest
 
     def barrier(self, idx=-1):
         if idx == -1:
@@ -146,17 +153,23 @@ class Block(SyntaxRule):
         
         end = parser.idx
         parser.pop()
-        parser.barrier(end)
 
+        # Barrier is now owned by its own frame so it gets rolled back on failure
+        parser.push()
+        parser.barrier(end)
 
         # Parse contents
         success, contents_node = self.contents_rule.check(parser)
         if not success:
+            parser.pop()
             return False, None
 
         end_tok = parser.expect(self.end_t)
         if not end_tok:
+            parser.pop()
             return False, None
+
+        parser.squash()
 
         # Create AST node if class provided
         if self.node_class:
@@ -286,6 +299,20 @@ class Variable(SyntaxRule):
     def __repr__(self):
         return f"Variable({self.name})"
 
+class FuType(SyntaxRule):
+    def __init__(self, name=None, args=[], node_class=None):
+        self.name = name
+        self.args = args
+        self.node_class = node_class
+
+    def check(self, parser):
+        success, res = Chain(Variable("name"), Optional(Block(Delimited(Ref("arg")), start_t="<", end_t=">"), default=[])).check(parser)
+        
+        return success, (res[0].value, res[1])
+
+    def __repr__(self):
+        return f"Variable({self.name})"
+
 class Any(SyntaxRule):
     def __init__(self, *options, node_class=None):
         self.options = options
@@ -307,8 +334,9 @@ class Any(SyntaxRule):
         return f"Any({len(self.options)})"
 
 class Optional(SyntaxRule):
-    def __init__(self, option):
+    def __init__(self, option, default=None):
         self.option = option
+        self.default = default
     
     def check(self, parser):
         parser.push()
@@ -318,7 +346,7 @@ class Optional(SyntaxRule):
             return True, node
         else:
             parser.pop()
-            return True, None
+            return True, self.default
 
     def __repr__(self):
         return f"Optional({repr(self.option)})"
@@ -347,6 +375,7 @@ class Name(SyntaxRule):
         success, node = Chain(
             Variable("name"),
             Optional(Block(Ref("idx"), start_t="[", end_t="]")),
+            Optional(Chain(Symbol("."), Ref("child"), node_class=lambda *x: x[1])),
             node_class=NameBuilder).check(parser)
         if success:
             if self.node_class:
@@ -361,7 +390,7 @@ class Statements(SyntaxRule):
     @staticmethod
     def check(parser):
         statement_nodes = []
-        best_errors, progress = None, 0
+        best_errors, best_idx = None, -1
         Statement.offs += 4
 
         while parser.available():
@@ -378,32 +407,32 @@ class Statements(SyntaxRule):
                     found = True
                     statement_nodes.append(node)
                     break
+
                 print(parser.errors)
 
-                # Track furthest failure
-                if parser.idx * (len(Statements.statements) - depth) > progress:
-                    progress = parser.idx * (len(Statements.statements) - depth)
+                # Track the attempt that got furthest by token index
+                if parser.idx > best_idx:
+                    best_idx = parser.idx
                     best_errors = parser.errors.copy()
-                parser.pop()
 
-                
+                parser.pop()
 
             if found:
                 # Expect semicolon after statement
                 if not parser.expect(";"):
                     statement_nodes.pop()
                     parser.pop()
+                    Statement.offs -= 4
                     return False, None
                 parser.squash()
             else:
-
-                # No statement matched - restore best error
+                # No statement matched - restore best error context
                 if best_errors:
                     parser.errors = best_errors
-                parser.idx = progress
-
+                Statement.offs -= 4
                 return False, None
         
+        Statement.offs -= 4
         return True, statement_nodes
 
     @staticmethod
@@ -424,9 +453,21 @@ class Statement(SyntaxRule):
         print(f"{' '*Statement.offs}TEST {self.name} {parser.token}")
         Statement.offs += 4
         success, node = Statements.statements[self.name].check(parser)
-
         Statement.offs -= 4
         print(f"{' '*Statement.offs}{'PASS' if success else 'FAIL'} {self.name} L{parser.token.line}C{parser.token.col} {parser.token}")
+
+        if not success:
+            tok = parser.token
+            if tok:
+                candidate = {
+                    'message': f"Expected '{self.name}' statement",
+                    'token': tok,
+                    'line': tok.line,
+                    'col': tok.col,
+                    'pos': tok.pos,
+                }
+                if not parser.furthest_error or candidate['pos'] >= parser.furthest_error['pos']:
+                    parser.furthest_error = candidate
 
         return success, node
 
@@ -457,9 +498,11 @@ def ClassBuilder(keyword, name, block):
     return ASTClass(name.value, block)
 
 def DeclarationBuilder(name_obj, colon, type_):
-    name, size = name_obj
+    name, size, child = name_obj
     size = 1
-    return ASTDeclaration(name, type_.value, length=size)
+
+    print(type_)
+    return ASTDeclaration(name, type_, length=size)
 
 def NewBuilder(keyword, declaration):
     return ASTNew(declaration)
@@ -484,22 +527,26 @@ def ExpressionBuilder(left, op_tok, right):
 def RefBuilder(name_obj):
     print("SYMBOLL: ", name_obj)
     assert "[" not in name_obj[0]
-    name, idx = name_obj
+    name, idx, child = name_obj
     try:
         j = int(name)
-        print("AAAAAAAAAAAAAAAAAAAAAA\nAAAAA\nAA")
         return ASTStatic(j) 
     except ValueError:
         pass
-    return ASTReference(name, idx)
 
-def NameBuilder(tok, opt_size):
+    ref = ASTReference(name, idx)
+
+    if child != None:
+        return ASTAtrribute(ref, child)
+    return ref
+
+def NameBuilder(tok, opt_size, opt_child):
     print("NAMEEE: ", tok, opt_size)
     name = tok.value
     size = 1
     if opt_size != None:
         size = opt_size
-    return (name, opt_size)
+    return (name, opt_size, opt_child)
 
 def IfBuilder(keyword, condition, block):
     return ASTIfStatement(condition, block)
@@ -542,7 +589,7 @@ Statements.register("call", Chain(
 
 Statements.register("return", Chain(
     Keyword("return"),
-    Ref("ref"),
+    Statement("expression"),
     node_class=ReturnBuilder
 ))
 
@@ -558,16 +605,18 @@ Statements.register("assignment", Chain(
 Statements.register("declaration", Chain(
     Name("decname"),
     Symbol(":"),
-    Variable("type"),
+    FuType("type"),
     node_class=DeclarationBuilder
 ))
 
 
 Statements.register("expression", Any(
-    Statement("operation"),
-    Statement("call"),
-    Ref("var"),
-))
+    Block(Statement("expression")),
+    Any(
+        Statement("operation"),
+        Statement("call"),
+        Ref("var"),
+)))
 
 Statements.register("operation",
     Chain(
@@ -624,17 +673,25 @@ def print_errors(parser, source_lines):
         print(f"\nMost likely issue at line {err['line']}, column {err['col']}:")
         print(f"  {err['message']}")
         
-        # Show source line with pointer
-        if err['line'] <= len(source_lines):
+        # Show source line with pointer (col is 0-indexed)
+        if 0 < err['line'] <= len(source_lines):
             line = source_lines[err['line'] - 1]
             print(f"\n  {err['line']} | {line}")
-            print(f"      {' ' * err['col']}^")
+            print(f"  {' ' * (len(str(err['line'])) + 3 + err['col'])}^")
     
-    # Show all errors
-    print(f"\nAll errors ({len(parser.errors)}):")
-    for i, err in enumerate(parser.errors, 1):  # Limit to first 10
+    # Deduplicate errors by (line, col, message) before displaying
+    seen = set()
+    unique_errors = []
+    for err in parser.errors:
+        key = (err['line'], err['col'], err['message'])
+        if key not in seen:
+            seen.add(key)
+            unique_errors.append(err)
+
+    limit = 10
+    print(f"\nAll errors ({len(unique_errors)}):")
+    for i, err in enumerate(unique_errors[:limit], 1):
         print(f"  {i}. Line {err['line']}, Col {err['col']}: {err['message']}")
     
-    if len(parser.errors) > 10:
-        print(f"  ... and {len(parser.errors) - 10} more errors")
-
+    if len(unique_errors) > limit:
+        print(f"  ... and {len(unique_errors) - limit} more errors")

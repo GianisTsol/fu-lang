@@ -10,6 +10,8 @@ ARGS_REGISTERS = 4
 
 class IMI(IntEnum):
     """Intermediate Machine Instruction opcodes."""
+    LOAD = 0
+    STORE = 1
     MOVE = 2
     PUSH = 3
     POP = 4
@@ -25,8 +27,13 @@ class IMI(IntEnum):
     JGT = 14  # Jump if greater than
     JLT = 15  # Jump if less than
     CALL = 16
+
     RET = 17
     NOP = 18
+
+    ALLOC = 19
+    FREE = 20
+
 
 class Spec:
     def __init__(self, number_of_operands, operands_affected=[]):
@@ -34,6 +41,8 @@ class Spec:
         self.operands_affected = operands_affected
         
 InstructionSpecs = {
+    IMI.LOAD: Spec(2, [0]),
+    IMI.STORE: Spec(2, [0]),
     IMI.MOVE: Spec(2, [0]),
     IMI.JUMP: Spec(1, []),
     IMI.LABEL: Spec(1, []),
